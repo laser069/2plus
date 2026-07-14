@@ -25,7 +25,7 @@ def _test_llm() -> None:
     emb = llm.embed("hello world")
     print(f"  embedding dims: {len(emb)}")
     assert len(emb) > 0, "empty embedding"
-    print("LLM smoke test PASSED ✓")
+    print("LLM smoke test PASSED")
 
 
 def _test_rag() -> None:
@@ -44,7 +44,7 @@ def _test_rag() -> None:
     assert results, "no results returned"
 
     delete_by_doc_id(doc_id)
-    print("RAG smoke test PASSED ✓")
+    print("RAG smoke test PASSED")
 
 
 def _test_browser() -> None:
@@ -60,7 +60,7 @@ def _test_browser() -> None:
         print(f"Fetching {url}…")
         text = fetch_page(url)
         print(f"  extracted chars: {len(text)}")
-    print("Browser smoke test PASSED ✓")
+    print("Browser smoke test PASSED")
 
 
 def _cli_chat() -> None:

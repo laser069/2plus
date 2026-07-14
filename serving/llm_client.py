@@ -50,12 +50,14 @@ class LLMClient:
     ) -> ChatResponse:
         model = model or MODEL_ROUTER["default"]
 
-        # Prepend /no_think unless caller wants chain-of-thought
-        if not think and messages and messages[0]["role"] == "system":
-            if "/no_think" not in messages[0]["content"]:
-                messages = [
-                    {**messages[0], "content": "/no_think\n" + messages[0]["content"]}
-                ] + messages[1:]
+        # Prepend /no_think to first user message (Qwen3 reads it from user turn)
+        if not think:
+            msgs = list(messages)
+            for i, m in enumerate(msgs):
+                if m["role"] == "user" and "/no_think" not in (m.get("content") or ""):
+                    msgs[i] = {**m, "content": "/no_think\n" + (m["content"] or "")}
+                    break
+            messages = msgs
 
         chars_in = sum(len(m.get("content") or "") for m in messages)
         t0 = time.perf_counter()

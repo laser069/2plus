@@ -8,7 +8,7 @@ from config.settings import RAG_CHUNK_MAX
 def search_web(query: str, max_results: int = 5) -> list[dict]:
     """DuckDuckGo text search. Returns list of {title, url, snippet}."""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         return [

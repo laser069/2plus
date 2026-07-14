@@ -11,8 +11,7 @@ Rules:
 - Use /no_think mode by default; think deeply only for complex multi-step problems
 """
 
-ROUTER_PROMPT = """/no_think
-Classify this user query into one or more routing tags. Output ONLY a JSON array of strings.
+ROUTER_PROMPT = """Classify this user query into one or more routing tags. Output ONLY a JSON array of strings.
 
 Valid tags:
 - "use_rag"     — query can be answered from uploaded documents
@@ -31,8 +30,7 @@ Q: "What's my name?" → ["use_memory"]
 Query: {query}
 Tags:"""
 
-FACT_EXTRACT_PROMPT = """/no_think
-Extract any new or updated facts about the user from this assistant message.
+FACT_EXTRACT_PROMPT = """Extract any new or updated facts about the user from this assistant message.
 Output ONLY a JSON object like {{"key": "value"}} with short snake_case keys.
 If no new user facts, output {{}}.
 
