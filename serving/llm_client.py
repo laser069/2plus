@@ -3,7 +3,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import ollama
 from loguru import logger
@@ -80,6 +80,38 @@ class LLMClient:
             return ChatResponse(content="", model=model)
         finally:
             _log_call(model, "chat", (time.perf_counter() - t0) * 1000, success, chars_in)
+
+    def chat_stream(
+        self,
+        messages: list[dict],
+        model: str | None = None,
+        think: bool = False,
+    ) -> Generator[str, None, None]:
+        """Stream final-answer tokens. Do NOT use when tools are needed."""
+        model = model or MODEL_ROUTER["default"]
+
+        if not think:
+            msgs = list(messages)
+            for i, m in enumerate(msgs):
+                if m["role"] == "user" and "/no_think" not in (m.get("content") or ""):
+                    msgs[i] = {**m, "content": "/no_think\n" + (m["content"] or "")}
+                    break
+            messages = msgs
+
+        chars_in = sum(len(m.get("content") or "") for m in messages)
+        t0 = time.perf_counter()
+        success = False
+        try:
+            for chunk in self._client.chat(model=model, messages=messages, stream=True):
+                delta = (chunk.message.content or "") if chunk.message else ""
+                if delta:
+                    yield delta
+            success = True
+        except Exception as exc:
+            logger.error(f"chat_stream error: {exc}")
+            yield f"[stream error: {exc}]"
+        finally:
+            _log_call(model, "chat_stream", (time.perf_counter() - t0) * 1000, success, chars_in)
 
     def embed(self, text: str, model: str | None = None) -> list[float]:
         model = model or MODEL_ROUTER["embed"]
