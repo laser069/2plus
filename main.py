@@ -12,6 +12,9 @@ Usage:
 import sys
 from pathlib import Path
 
+from config.logging_config import setup_logging
+setup_logging()
+
 
 def _test_llm() -> None:
     from serving.llm_client import LLMClient
