@@ -30,8 +30,12 @@ class ConvoMemory:
         with self._lock:
             self._turns.append({"role": role, "content": content})
 
-    def maybe_summarise(self, llm: LLMClient) -> None:
-        """Compress oldest half of turns into summary when window overflows."""
+    def maybe_summarise(self, llm: LLMClient, model: str | None = None) -> None:
+        """Compress oldest half of turns into summary when window overflows.
+
+        Routes with the active chat model so a cloud session doesn't trigger a
+        local model load in the background (and a local session reuses the
+        resident model)."""
         with self._lock:
             if len(self._turns) <= CONVO_WINDOW:
                 return
@@ -47,7 +51,7 @@ class ConvoMemory:
         )
         resp = llm.chat(
             [{"role": "user", "content": prompt}],
-            model=None,
+            model=model,
         )
         summary = (resp.content or "").strip()[:SUMMARY_MAX_CHARS]
         uf.upsert(_SUMMARY_KEY, summary)

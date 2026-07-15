@@ -11,6 +11,7 @@ from loguru import logger
 from config.settings import (
     MODEL_ROUTER,
     OLLAMA_BASE_URL,
+    OLLAMA_KEEP_ALIVE,
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
@@ -158,6 +159,25 @@ class LLMClient:
             )
         return self._openai_client
 
+    def warm(self, model: str | None = None) -> None:
+        """Preload a local model into VRAM so the first real query isn't a cold
+        load. No-op for OpenRouter (cloud models have no local residency).
+        Best-effort: failures are logged, never raised."""
+        model = model or MODEL_ROUTER["default"]
+        if _is_openrouter(model):
+            return
+        try:
+            t0 = time.perf_counter()
+            self._ollama.chat(
+                model=model,
+                messages=[{"role": "user", "content": "hi"}],
+                keep_alive=OLLAMA_KEEP_ALIVE,
+                options={"num_predict": 1},
+            )
+            logger.info(f"warm {model}  {(time.perf_counter() - t0) * 1000:.0f}ms")
+        except Exception as exc:
+            logger.warning(f"warm failed ({model}): {exc}")
+
     # ── chat ─────────────────────────────────────────────────────────────────
 
     def chat(
@@ -208,7 +228,11 @@ class LLMClient:
     ) -> tuple[str, list]:
         if not think:
             messages = _inject_no_think(messages)
-        kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "keep_alive": OLLAMA_KEEP_ALIVE,
+        }
         if tools:
             kwargs["tools"] = tools
         resp = self._ollama.chat(**kwargs)
@@ -295,7 +319,9 @@ class LLMClient:
     ) -> Generator[str, None, None]:
         if not think:
             messages = _inject_no_think(messages)
-        for chunk in self._ollama.chat(model=model, messages=messages, stream=True):
+        for chunk in self._ollama.chat(
+            model=model, messages=messages, stream=True, keep_alive=OLLAMA_KEEP_ALIVE
+        ):
             delta = (chunk.message.content or "") if chunk.message else ""
             if delta:
                 yield delta
@@ -323,7 +349,9 @@ class LLMClient:
         t0 = time.perf_counter()
         success = False
         try:
-            resp = self._ollama.embeddings(model=model, prompt=text)
+            resp = self._ollama.embeddings(
+                model=model, prompt=text, keep_alive=OLLAMA_KEEP_ALIVE
+            )
             success = True
             latency = (time.perf_counter() - t0) * 1000
             logger.debug(f"embed  {model}  {latency:.0f}ms  chars={len(text)}")

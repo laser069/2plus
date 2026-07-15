@@ -7,7 +7,7 @@ from loguru import logger
 
 from serving.llm_client import LLMClient
 from orchestrator.prompts import ROUTER_PROMPT
-from config.settings import MODEL_ROUTER, ROUTER_CACHE_SIZE
+from config.settings import MODEL_ROUTER, ROUTER_CACHE_SIZE, ROUTER_LLM_FALLBACK
 
 _llm = LLMClient()
 _VALID_TAGS = {"use_rag", "use_browser", "use_memory", "direct"}
@@ -59,8 +59,8 @@ _MEMORY_RETRIEVE_KW = re.compile(
 )
 
 
-def _heuristic(query: str) -> tuple[str, ...] | None:
-    """Fast keyword-based classification. Returns None if ambiguous → LLM fallback."""
+def _heuristic_tags(query: str) -> list[str]:
+    """Fast keyword-based tag extraction. May return 0, 1, or many tags."""
     q = query.strip()
     tags: list[str] = []
 
@@ -71,26 +71,22 @@ def _heuristic(query: str) -> tuple[str, ...] | None:
     if _MEMORY_KW.search(q) or _MEMORY_RETRIEVE_KW.search(q):
         tags.append("use_memory")
 
-    if not tags:
-        # No signals → direct (greetings, math, general knowledge, etc.)
-        return ("direct",)
-
-    if len(tags) == 1:
-        return tuple(tags)
-
-    # Multiple signals → ambiguous, let LLM decide
-    return None
+    return tags
 
 
 # ── LLM fallback (cached) ─────────────────────────────────────────────────────
 
 @lru_cache(maxsize=ROUTER_CACHE_SIZE)
-def _classify_llm(query: str) -> tuple[str, ...]:
-    """LLM-based fallback for ambiguous queries only. Cached."""
+def _classify_llm(query: str, model: str | None = None) -> tuple[str, ...]:
+    """LLM-based disambiguation for ambiguous queries only. Cached.
+
+    Routes with `model` (the active chat model) when provided so a cloud chat
+    model disambiguates via the cloud and a local one reuses the resident model —
+    avoiding a second local model load. Falls back to the small `fast` model."""
     prompt = ROUTER_PROMPT.format(query=query)
     resp = _llm.chat(
         [{"role": "user", "content": prompt}],
-        model=MODEL_ROUTER["fast"],
+        model=model or MODEL_ROUTER["fast"],
     )
     raw = (resp.content or "").strip()
     try:
@@ -108,29 +104,40 @@ def _classify_llm(query: str) -> tuple[str, ...]:
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
-def classify(query: str) -> tuple[str, ...]:
+def classify(query: str, model: str | None = None) -> tuple[str, ...]:
     """Classify a user query into routing tags.
 
-    Fast path: keyword heuristic (<1ms).
-    Slow path: LLM call only for ambiguous multi-signal queries (cached).
+    Fast path: keyword heuristic (<1ms). Handles no-signal (→direct) and
+    unambiguous single-signal queries directly.
+
+    Multi-signal queries: by default resolve to the UNION of matched tags (no LLM,
+    no extra model load). If ROUTER_LLM_FALLBACK is set, disambiguate with an LLM
+    routed through `model` (the active chat model) so no second/local model loads.
+
     Returns a tuple — callers iterate it like a list.
     """
     t0 = perf_counter()
 
-    result = _heuristic(query)
+    tags = _heuristic_tags(query)
     elapsed_ms = (perf_counter() - t0) * 1000
 
-    if result is not None:
+    if not tags:
+        logger.debug(f"router heuristic: {elapsed_ms:.1f}ms → ['direct']")
+        return ("direct",)
+
+    if len(tags) == 1 or not ROUTER_LLM_FALLBACK:
+        # Single signal, or multi-signal with LLM fallback disabled → union of tags.
+        result = tuple(tags)
         logger.debug(f"router heuristic: {elapsed_ms:.1f}ms → {list(result)}")
         return result
 
-    # Ambiguous — check LLM cache first, then call if needed
+    # Ambiguous multi-signal + fallback enabled — check LLM cache first, then call.
     before = _classify_llm.cache_info().hits
-    result = _classify_llm(query)
+    result = _classify_llm(query, model)
     elapsed_ms = (perf_counter() - t0) * 1000
     if _classify_llm.cache_info().hits > before:
         logger.debug(f"router LLM cache hit: {elapsed_ms:.1f}ms → {list(result)}")
     else:
-        logger.info(f"router LLM fallback: {elapsed_ms:.0f}ms → {list(result)}")
+        logger.info(f"router LLM fallback ({model or MODEL_ROUTER['fast']}): {elapsed_ms:.0f}ms → {list(result)}")
 
     return result

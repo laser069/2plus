@@ -33,10 +33,13 @@ def _extract_citations(text: str) -> list[str]:
     return re.findall(r"\[(?:doc|web):[^\]]+\]", text)
 
 
-def _extract_facts(assistant_msg: str) -> None:
-    """Parse new user facts from the assistant's response and upsert them."""
+def _extract_facts(assistant_msg: str, model: str | None = None) -> None:
+    """Parse new user facts from the assistant's response and upsert them.
+
+    Routes with the active chat model so a local session reuses the resident
+    model (no extra load) and a cloud session doesn't spin up a local one."""
     prompt = FACT_EXTRACT_PROMPT.format(message=assistant_msg[:1000])
-    resp = _llm.chat([{"role": "user", "content": prompt}], model=None)
+    resp = _llm.chat([{"role": "user", "content": prompt}], model=model)
     raw = (resp.content or "").strip()
     try:
         match = re.search(r"\{.*?\}", raw, re.DOTALL)
@@ -77,7 +80,7 @@ class Agent:
         t0 = perf_counter()
 
         # 1. Route
-        routes = classify(query)
+        routes = classify(query, model=model)
         t_router = perf_counter()
         logger.info(f"query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={list(routes)}")
 
@@ -158,10 +161,10 @@ class Agent:
         # 6. Update convo memory (background)
         _bg(self.convo.add_turn, "user", query)
         _bg(self.convo.add_turn, "assistant", answer)
-        _bg(self.convo.maybe_summarise, _llm)
+        _bg(self.convo.maybe_summarise, _llm, model)
 
         # 7. Extract any new user facts from answer (background)
-        _bg(_extract_facts, answer)
+        _bg(_extract_facts, answer, model)
 
         return AgentResponse(
             answer=answer,
@@ -182,7 +185,7 @@ class Agent:
         t0 = perf_counter()
 
         # 1. Route
-        routes = classify(query)
+        routes = classify(query, model=model)
         t_router = perf_counter()
         router_ms = (t_router - t0) * 1000
         logger.info(f"[stream] query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={list(routes)}")
@@ -291,10 +294,10 @@ class Agent:
         # 4. Update convo memory (background — non-blocking)
         _bg(self.convo.add_turn, "user", query)
         _bg(self.convo.add_turn, "assistant", answer)
-        _bg(self.convo.maybe_summarise, _llm)
+        _bg(self.convo.maybe_summarise, _llm, model)
 
         # 5. Extract facts (background — non-blocking)
-        _bg(_extract_facts, answer)
+        _bg(_extract_facts, answer, model)
 
         yield {
             "type": "done",

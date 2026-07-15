@@ -350,6 +350,17 @@ else:  # auto
     _active_model = _local
     _fallback_model = _or or None
 
+# ── Warm active model (non-blocking) ──────────────────────────────────────────
+# Preload the model into VRAM on first use / model change so the first real query
+# isn't a cold load. No-op for cloud models. Fires once per model selection.
+if st.session_state.get("_warmed_model") != _active_model:
+    st.session_state._warmed_model = _active_model
+    import threading as _threading
+    from serving.llm_client import LLMClient as _LLMClient
+    _threading.Thread(
+        target=_LLMClient().warm, args=(_active_model,), daemon=True
+    ).start()
+
 # ── Header ────────────────────────────────────────────────────────────────────
 _MODE_META = {
     "local": ("⬡", "#2dd4bf", "LOCAL"),
