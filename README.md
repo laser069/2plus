@@ -12,21 +12,22 @@ A fully local, privacy-first AI assistant that combines retrieval-augmented gene
 4. [Prerequisites](#prerequisites)
 5. [Installation](#installation)
 6. [Running 2Plus](#running-2plus)
-7. [Project Structure](#project-structure)
-8. [Module Reference](#module-reference)
-9. [Configuration](#configuration)
-10. [How It Works](#how-it-works)
-11. [Context Budget System](#context-budget-system)
-12. [Git Branch Strategy](#git-branch-strategy)
-13. [Smoke Tests](#smoke-tests)
-14. [Troubleshooting](#troubleshooting)
-15. [Roadmap](#roadmap)
+7. [OpenRouter Integration](#openrouter-integration)
+8. [Project Structure](#project-structure)
+9. [Module Reference](#module-reference)
+10. [Configuration](#configuration)
+11. [How It Works](#how-it-works)
+12. [Context Budget System](#context-budget-system)
+13. [Git Branch Strategy](#git-branch-strategy)
+14. [Smoke Tests](#smoke-tests)
+15. [Troubleshooting](#troubleshooting)
+16. [Roadmap](#roadmap)
 
 ---
 
 ## Overview
 
-2Plus is built around a **ReAct (Reason + Act)** agent loop that intelligently decides when to search your documents, browse the web, recall stored facts, or answer directly from its own knowledge. It is designed to run entirely offline (except for web search queries) using [Ollama](https://ollama.com/) for local LLM inference.
+2Plus is built around a **ReAct (Reason + Act)** agent loop that intelligently decides when to search your documents, browse the web, recall stored facts, or answer directly from its own knowledge. It runs primarily on [Ollama](https://ollama.com/) for fully local LLM inference, with optional cloud routing to any model on [OpenRouter](https://openrouter.ai/) when you need stronger reasoning or larger context windows.
 
 **Primary model:** `qwen3:8b`  
 **Embeddings model:** `all-minilm:l6-v2`  
@@ -179,6 +180,90 @@ python main.py --test-llm      # Tests chat and embedding endpoints
 python main.py --test-rag      # Tests document ingestion and retrieval
 python main.py --test-browser  # Tests DuckDuckGo search and page fetch
 ```
+
+---
+
+## OpenRouter Integration
+
+2Plus supports routing individual conversations to cloud models via [OpenRouter](https://openrouter.ai/), giving you access to models like Claude, GPT-4o, Gemini, and DeepSeek without replacing the local Ollama setup. Ollama remains the default for all inference; OpenRouter is purely opt-in per conversation.
+
+### Prerequisites
+
+1. Create a free account at [openrouter.ai](https://openrouter.ai/)
+2. Generate an API key at [openrouter.ai/keys](https://openrouter.ai/keys)
+3. Add credits to your OpenRouter account (pay-as-you-go, no subscription required)
+
+### Setup
+
+Add your API key to the `.env` file in the project root:
+
+```
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+No other configuration is needed. The key is loaded automatically on startup.
+
+### Using OpenRouter in the UI
+
+In the Streamlit sidebar, you will find a **Cloud · OpenRouter** section beneath the Ollama model selector. Paste any valid OpenRouter model identifier into the text field:
+
+```
+anthropic/claude-3.5-sonnet
+openai/gpt-4o
+google/gemini-2.0-flash-001
+deepseek/deepseek-r1
+meta-llama/llama-3.3-70b-instruct
+```
+
+The full list of available models and their IDs can be found at [openrouter.ai/models](https://openrouter.ai/models).
+
+**How the override works:**
+- When the OpenRouter model field is filled in, it overrides the Ollama model selector for that conversation.
+- The active model badge in the top-right of the chat area turns purple to indicate a cloud model is in use.
+- Clearing the field immediately reverts back to the Ollama model selected in the dropdown.
+
+### Full Tool Use with Cloud Models
+
+OpenRouter models participate in the full ReAct agent loop — the same reasoning cycle used with local Ollama models. This means cloud models can invoke all five tools:
+
+| Tool | What it does |
+|------|-------------|
+| `search_web` | DuckDuckGo search |
+| `fetch_page` | Extracts text content from a URL |
+| `search_docs` | Semantic search over your uploaded documents |
+| `update_memory` | Stores a user fact persistently |
+| `recall_memory` | Retrieves all stored user facts |
+
+Tool call format is automatically translated between Ollama's native format and the OpenAI-compatible format required by OpenRouter. No changes to prompts or tool definitions are needed.
+
+### What stays local
+
+Even when an OpenRouter model is selected, the following always use local Ollama:
+
+- **Text embeddings** (`all-minilm:l6-v2`) — used for RAG document indexing and retrieval
+- **Query routing** (`qwen3.5:4b`) — the fast classifier that picks which tools to activate
+- **Conversation summarisation** — compresses older turns to keep context short
+- **Fact extraction** — parses new user facts from assistant responses
+
+This design keeps your documents and facts private while optionally using cloud models for the main reasoning step.
+
+### Cost considerations
+
+OpenRouter charges per token on a pay-as-you-go basis. The context budget system (6 000-character default) naturally limits token usage. You can monitor your spending at [openrouter.ai/activity](https://openrouter.ai/activity).
+
+### Troubleshooting OpenRouter
+
+**"OPENROUTER_API_KEY missing in .env" warning in the sidebar**  
+The model name field is filled in but the key is not set. Add `OPENROUTER_API_KEY=...` to your `.env` file and restart the Streamlit server.
+
+**`AuthenticationError` in the logs**  
+The API key is present but invalid or expired. Generate a new key at [openrouter.ai/keys](https://openrouter.ai/keys).
+
+**`RateLimitError` or `InsufficientCreditsError`**  
+Your OpenRouter account balance is depleted. Top up credits at [openrouter.ai/credits](https://openrouter.ai/credits).
+
+**Model returns no tool calls (ReAct loop ends immediately)**  
+Some smaller or older models on OpenRouter do not reliably follow function-calling instructions. Switch to a model with strong tool-use capability such as `anthropic/claude-3.5-sonnet`, `openai/gpt-4o`, or `google/gemini-2.0-flash-001`.
 
 ---
 
@@ -510,6 +595,9 @@ SUMMARY_MAX_CHARS = 1000    # allow longer summaries
 **Environment variables (`.env` file):**
 ```
 OLLAMA_BASE_URL=http://localhost:11434
+
+# Optional — enables cloud model routing via OpenRouter
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 ---
@@ -690,7 +778,7 @@ pip install ddgs
 - [ ] Streaming responses in the Streamlit UI
 - [ ] PDF text extraction via `pypdf`
 - [ ] Reranker support (`bge-reranker`) for improved RAG quality
-- [ ] Cloud model fallback (OpenAI / Anthropic) via existing router seam
+- [x] Cloud model routing via OpenRouter (opt-in per conversation)
 - [ ] Vector-based chat history recall for fuzzy "what did we discuss" queries
 - [ ] Playwright fallback for JavaScript-heavy pages
 - [ ] Multi-user session support
