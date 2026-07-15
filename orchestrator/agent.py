@@ -174,11 +174,10 @@ class Agent:
             steps += 1
 
             if not resp.tool_calls:
-                # Stream the final answer
-                messages.append({"role": "assistant", "content": resp.content or ""})
-                for chunk in _llm.chat_stream(messages[:-1], model=model, think=think, fallback_model=fallback_model):
-                    answer_chunks.append(chunk)
-                    yield chunk
+                # Yield content already received — avoids a second model call
+                content = resp.content or ""
+                answer_chunks.append(content)
+                yield content
                 break
 
             messages.append({"role": "assistant", "content": resp.content or "", "tool_calls": resp.tool_calls})
