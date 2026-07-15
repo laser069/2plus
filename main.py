@@ -12,6 +12,9 @@ Usage:
 import sys
 from pathlib import Path
 
+from config.logging_config import setup_logging
+setup_logging()
+
 
 def _test_llm() -> None:
     from serving.llm_client import LLMClient
@@ -66,8 +69,11 @@ def _test_browser() -> None:
 def _cli_chat() -> None:
     from memory.convo import ConvoMemory
     from orchestrator.agent import Agent
+    from serving.llm_client import LLMClient
     convo = ConvoMemory()
     agent = Agent(convo)
+    # Warm the default model so the first prompt isn't a cold VRAM load.
+    LLMClient().warm()
     print("2Plus CLI — type 'quit' to exit\n")
     while True:
         try:
