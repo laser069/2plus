@@ -14,11 +14,14 @@ def setup_logging() -> None:
     debug = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
     level = "DEBUG" if debug else "INFO"
 
-    logger.remove()  # drop default stderr handler (unstyled, wrong format)
+    logger.remove()  # drop default stderr handler
+
+    # Use sys.__stdout__ — the real terminal stdout before Streamlit captures sys.stderr/stdout
+    _terminal = sys.__stdout__ or sys.stdout
 
     # ── Terminal ──────────────────────────────────────────────────────────────
     logger.add(
-        sys.stderr,
+        _terminal,
         level=level,
         colorize=True,
         format=(
