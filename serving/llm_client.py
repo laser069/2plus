@@ -55,8 +55,15 @@ class ChatResponse:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _log_call(model: str, kind: str, latency_ms: float, success: bool, chars_in: int) -> None:
-    entry = {
+def _log_call(
+    model: str,
+    kind: str,
+    latency_ms: float,
+    success: bool,
+    chars_in: int,
+    ttft_ms: float | None = None,
+) -> None:
+    entry: dict = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "model": model,
         "kind": kind,
@@ -64,6 +71,8 @@ def _log_call(model: str, kind: str, latency_ms: float, success: bool, chars_in:
         "success": success,
         "chars_in": chars_in,
     }
+    if ttft_ms is not None:
+        entry["ttft_ms"] = round(ttft_ms, 1)
     with open(_call_log, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -246,27 +255,40 @@ class LLMClient:
         model = model or MODEL_ROUTER["default"]
         chars_in = sum(len(m.get("content") or "") for m in messages)
         t0 = time.perf_counter()
+        ttft_ms: float | None = None
         success = False
         logger.info(f"stream {model}  start")
         try:
             if _is_openrouter(model):
-                yield from self._stream_openrouter(messages, model)
+                gen = self._stream_openrouter(messages, model)
             else:
                 try:
-                    yield from self._stream_ollama(messages, model, think)
+                    gen = self._stream_ollama(messages, model, think)
                 except Exception as ollama_exc:
                     if fallback_model and _is_openrouter(fallback_model):
                         logger.warning(f"Ollama stream failed → falling back to {fallback_model}")
-                        yield from self._stream_openrouter(messages, fallback_model)
+                        gen = self._stream_openrouter(messages, fallback_model)
+                        model = fallback_model
                     else:
                         raise ollama_exc
+
+            first = True
+            for delta in gen:
+                if first:
+                    ttft_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(f"stream {model}  ttft={ttft_ms:.0f}ms")
+                    first = False
+                yield delta
+
             success = True
-            logger.info(f"stream {model}  done  {(time.perf_counter()-t0)*1000:.0f}ms")
+            total_ms = (time.perf_counter() - t0) * 1000
+            logger.info(f"stream {model}  done  ttft={ttft_ms or 0:.0f}ms  total={total_ms:.0f}ms")
         except Exception as exc:
             logger.error(f"chat_stream error ({model}): {exc}")
             yield f"[stream error: {exc}]"
         finally:
-            _log_call(model, "chat_stream", (time.perf_counter() - t0) * 1000, success, chars_in)
+            total_ms = (time.perf_counter() - t0) * 1000
+            _log_call(model, "chat_stream", total_ms, success, chars_in, ttft_ms=ttft_ms)
 
     def _stream_ollama(
         self, messages: list[dict], model: str, think: bool
