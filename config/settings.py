@@ -42,3 +42,6 @@ RAG_CHUNK_MAX     = 1200   # max chars per retrieved chunk
 
 # --- Conversation window ---
 CONVO_WINDOW     = 6       # verbatim turns before summarising older ones
+
+# --- Router cache ---
+ROUTER_CACHE_SIZE = 128    # LRU slots for classify() result cache

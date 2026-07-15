@@ -221,13 +221,12 @@ class Agent:
                 steps += 1
 
                 if not resp.tool_calls:
-                    # No tools needed — stream the synthesis step
-                    messages.append({"role": "user", "content": resp.content or ""})
-                    for chunk in _llm.chat_stream(messages, model=model, think=think, fallback_model=fallback_model):
-                        if t_first_tok is None:
-                            t_first_tok = perf_counter()
-                        answer_chunks.append(chunk)
-                        yield chunk
+                    # Model gave final answer — yield it directly (already generated)
+                    content = resp.content or ""
+                    if t_first_tok is None:
+                        t_first_tok = perf_counter()
+                    answer_chunks.append(content)
+                    yield content
                     break
 
                 messages.append({"role": "assistant", "content": resp.content or "", "tool_calls": resp.tool_calls})
