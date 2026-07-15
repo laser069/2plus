@@ -11,7 +11,7 @@ from memory.chat_history import load_session, save_message, delete_session
 from orchestrator.agent import Agent
 import memory.user_facts as uf
 from rag.ingestion import ingest, list_docs
-from config.settings import MODEL_ROUTER
+from config.settings import MODEL_ROUTER, OPENROUTER_API_KEY
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="2Plus", page_icon="⚡", layout="wide")
@@ -151,6 +151,8 @@ if "selected_model" not in st.session_state:
     st.session_state.selected_model = MODEL_ROUTER["default"]
 if "think_mode" not in st.session_state:
     st.session_state.think_mode = False
+if "or_model" not in st.session_state:
+    st.session_state.or_model = ""
 
 
 # ── Model list (cached 60s) ───────────────────────────────────────────────────
@@ -183,6 +185,18 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.session_state.think_mode = st.toggle("Think mode (slower, deeper)", value=st.session_state.think_mode)
+
+    # ── OpenRouter ──
+    st.subheader("Cloud · OpenRouter")
+    st.session_state.or_model = st.text_input(
+        "Model name",
+        value=st.session_state.or_model,
+        placeholder="anthropic/claude-3.5-sonnet",
+        help="Paste any OpenRouter model ID (provider/name). Overrides Ollama when set.",
+        label_visibility="collapsed",
+    )
+    if st.session_state.or_model and not OPENROUTER_API_KEY:
+        st.warning("OPENROUTER_API_KEY missing in .env")
 
     # ── Doc upload ──
     st.subheader("Documents")
@@ -230,13 +244,16 @@ with st.sidebar:
 
 
 # ── Main chat area ────────────────────────────────────────────────────────────
+_active_model = st.session_state.or_model.strip() or st.session_state.selected_model
+
 col_title, col_badge = st.columns([5, 1])
 with col_title:
     st.header("2Plus — Local AI Assistant", divider="gray")
 with col_badge:
+    _badge_color = "#a78af7" if st.session_state.or_model.strip() else "#4f8ef7"
     st.markdown(
-        f"<div style='text-align:right;padding-top:1.4rem;color:#4f8ef7;font-size:0.75rem;font-weight:600'>"
-        f"⚡ {st.session_state.selected_model}</div>",
+        f"<div style='text-align:right;padding-top:1.4rem;color:{_badge_color};font-size:0.75rem;font-weight:600'>"
+        f"⚡ {_active_model}</div>",
         unsafe_allow_html=True,
     )
 
@@ -272,7 +289,7 @@ if prompt := st.chat_input("Ask me anything…"):
 
         for event in st.session_state.agent.run_stream(
             prompt,
-            model=st.session_state.selected_model,
+            model=_active_model,
             think=st.session_state.think_mode,
         ):
             if isinstance(event, dict):
