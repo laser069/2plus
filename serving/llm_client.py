@@ -156,6 +156,7 @@ class LLMClient:
         model: str | None = None,
         tools: list[dict] | None = None,
         think: bool = False,
+        fallback_model: str | None = None,
     ) -> ChatResponse:
         model = model or MODEL_ROUTER["default"]
         chars_in = sum(len(m.get("content") or "") for m in messages)
@@ -165,7 +166,15 @@ class LLMClient:
             if _is_openrouter(model):
                 content, tool_calls = self._chat_openrouter(messages, model, tools)
             else:
-                content, tool_calls = self._chat_ollama(messages, model, tools, think)
+                try:
+                    content, tool_calls = self._chat_ollama(messages, model, tools, think)
+                except Exception as ollama_exc:
+                    if fallback_model and _is_openrouter(fallback_model):
+                        logger.warning(f"Ollama failed ({ollama_exc!s:.80}), falling back to {fallback_model}")
+                        content, tool_calls = self._chat_openrouter(messages, fallback_model, tools)
+                        model = fallback_model
+                    else:
+                        raise
             success = True
             return ChatResponse(
                 content=content,
@@ -229,6 +238,7 @@ class LLMClient:
         messages: list[dict],
         model: str | None = None,
         think: bool = False,
+        fallback_model: str | None = None,
     ) -> Generator[str, None, None]:
         """Stream final-answer tokens. Do NOT use when tools are needed."""
         model = model or MODEL_ROUTER["default"]
@@ -239,7 +249,14 @@ class LLMClient:
             if _is_openrouter(model):
                 yield from self._stream_openrouter(messages, model)
             else:
-                yield from self._stream_ollama(messages, model, think)
+                try:
+                    yield from self._stream_ollama(messages, model, think)
+                except Exception as ollama_exc:
+                    if fallback_model and _is_openrouter(fallback_model):
+                        logger.warning(f"Ollama stream failed, falling back to {fallback_model}")
+                        yield from self._stream_openrouter(messages, fallback_model)
+                    else:
+                        raise ollama_exc
             success = True
         except Exception as exc:
             logger.error(f"chat_stream error ({model}): {exc}")

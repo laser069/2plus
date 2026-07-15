@@ -50,7 +50,7 @@ class Agent:
     def __init__(self, convo: ConvoMemory) -> None:
         self.convo = convo
 
-    def run(self, query: str, model: str | None = None, think: bool = False) -> AgentResponse:
+    def run(self, query: str, model: str | None = None, think: bool = False, fallback_model: str | None = None) -> AgentResponse:
         # 1. Route
         routes = classify(query)
         logger.info(f"routes={routes} query={query[:80]!r}")
@@ -73,6 +73,7 @@ class Agent:
                 model=model,
                 think=think,
                 tools=tool_schemas if tool_schemas else None,
+                fallback_model=fallback_model,
             )
             steps += 1
 
@@ -101,7 +102,6 @@ class Agent:
                 else:
                     result = f"[unknown tool: {name}]"
 
-                # Truncate observation to remaining budget
                 result_str = str(result)[:max(remaining, 200)]
                 remaining -= len(result_str)
 
@@ -117,7 +117,7 @@ class Agent:
                     "role": "user",
                     "content": "[context budget reached — answer with information gathered so far]",
                 })
-                final = _llm.chat(messages, model=model, think=think)
+                final = _llm.chat(messages, model=model, think=think, fallback_model=fallback_model)
                 answer = final.content.strip()
                 steps += 1
                 break
@@ -140,7 +140,7 @@ class Agent:
         )
 
     def run_stream(
-        self, query: str, model: str | None = None, think: bool = False
+        self, query: str, model: str | None = None, think: bool = False, fallback_model: str | None = None
     ) -> Generator:
         """
         Mixed generator. Yields:
@@ -169,13 +169,14 @@ class Agent:
                 model=model,
                 think=think,
                 tools=tool_schemas if tool_schemas else None,
+                fallback_model=fallback_model,
             )
             steps += 1
 
             if not resp.tool_calls:
                 # Stream the final answer
                 messages.append({"role": "assistant", "content": resp.content or ""})
-                for chunk in _llm.chat_stream(messages[:-1], model=model, think=think):
+                for chunk in _llm.chat_stream(messages[:-1], model=model, think=think, fallback_model=fallback_model):
                     answer_chunks.append(chunk)
                     yield chunk
                 break
@@ -211,7 +212,7 @@ class Agent:
                     "role": "user",
                     "content": "[context budget reached — answer with information gathered so far]",
                 })
-                for chunk in _llm.chat_stream(messages, model=model, think=think):
+                for chunk in _llm.chat_stream(messages, model=model, think=think, fallback_model=fallback_model):
                     answer_chunks.append(chunk)
                     yield chunk
                 steps += 1
