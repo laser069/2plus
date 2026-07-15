@@ -15,11 +15,12 @@ from config.settings import (
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
 )
+from config.logging_config import setup_logging
+
+setup_logging()
 
 Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 _call_log = Path(LOG_DIR) / "calls.jsonl"
-
-logger.add(str(Path(LOG_DIR) / "2plus.log"), rotation="10 MB", retention=3)
 
 
 # ── Unified tool-call descriptor ─────────────────────────────────────────────
@@ -170,18 +171,19 @@ class LLMClient:
                     content, tool_calls = self._chat_ollama(messages, model, tools, think)
                 except Exception as ollama_exc:
                     if fallback_model and _is_openrouter(fallback_model):
-                        logger.warning(f"Ollama failed ({ollama_exc!s:.80}), falling back to {fallback_model}")
+                        logger.warning(f"Ollama failed → falling back to {fallback_model} | {ollama_exc!s:.80}")
                         content, tool_calls = self._chat_openrouter(messages, fallback_model, tools)
                         model = fallback_model
                     else:
                         raise
+            latency = (time.perf_counter() - t0) * 1000
             success = True
-            return ChatResponse(
-                content=content,
-                tool_calls=tool_calls,
-                model=model,
-                latency_ms=(time.perf_counter() - t0) * 1000,
+            tc_count = len(tool_calls)
+            logger.info(
+                f"chat  {model}  {latency:.0f}ms"
+                + (f"  tool_calls={tc_count}" if tc_count else "")
             )
+            return ChatResponse(content=content, tool_calls=tool_calls, model=model, latency_ms=latency)
         except Exception as exc:
             logger.error(f"chat error ({model}): {exc}")
             return ChatResponse(content="", model=model)
@@ -245,6 +247,7 @@ class LLMClient:
         chars_in = sum(len(m.get("content") or "") for m in messages)
         t0 = time.perf_counter()
         success = False
+        logger.info(f"stream {model}  start")
         try:
             if _is_openrouter(model):
                 yield from self._stream_openrouter(messages, model)
@@ -253,11 +256,12 @@ class LLMClient:
                     yield from self._stream_ollama(messages, model, think)
                 except Exception as ollama_exc:
                     if fallback_model and _is_openrouter(fallback_model):
-                        logger.warning(f"Ollama stream failed, falling back to {fallback_model}")
+                        logger.warning(f"Ollama stream failed → falling back to {fallback_model}")
                         yield from self._stream_openrouter(messages, fallback_model)
                     else:
                         raise ollama_exc
             success = True
+            logger.info(f"stream {model}  done  {(time.perf_counter()-t0)*1000:.0f}ms")
         except Exception as exc:
             logger.error(f"chat_stream error ({model}): {exc}")
             yield f"[stream error: {exc}]"
@@ -299,6 +303,8 @@ class LLMClient:
         try:
             resp = self._ollama.embeddings(model=model, prompt=text)
             success = True
+            latency = (time.perf_counter() - t0) * 1000
+            logger.debug(f"embed  {model}  {latency:.0f}ms  chars={len(text)}")
             return resp["embedding"]
         except Exception as exc:
             logger.error(f"embed error: {exc}")

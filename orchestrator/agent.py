@@ -53,7 +53,7 @@ class Agent:
     def run(self, query: str, model: str | None = None, think: bool = False, fallback_model: str | None = None) -> AgentResponse:
         # 1. Route
         routes = classify(query)
-        logger.info(f"routes={routes} query={query[:80]!r}")
+        logger.info(f"query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={routes}")
 
         # 2. Build base context (memory-injected, budget-tracked)
         messages, chars_used = self.convo.get_context(query, SYSTEM_PROMPT)
@@ -142,8 +142,7 @@ class Agent:
     def run_stream(
         self, query: str, model: str | None = None, think: bool = False, fallback_model: str | None = None
     ) -> Generator:
-        """
-        Mixed generator. Yields:
+        """Mixed generator. Yields:
           dict {"type": "routing", "routes": [...]}
           dict {"type": "tool", "name": str, "step": int}
           str  — final answer token chunks
@@ -151,7 +150,7 @@ class Agent:
         """
         # 1. Route
         routes = classify(query)
-        logger.info(f"routes={routes} query={query[:80]!r}")
+        logger.info(f"[stream] query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={routes}")
         yield {"type": "routing", "routes": routes}
 
         # 2. Build context
