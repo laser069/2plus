@@ -14,8 +14,6 @@ from config.settings import (
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
-    GROQ_API_KEY,
-    GROQ_BASE_URL,
 )
 from config.logging_config import setup_logging
 
@@ -71,14 +69,6 @@ def _log_call(model: str, kind: str, latency_ms: float, success: bool, chars_in:
 
 
 def _provider(model: str) -> str:
-    """Resolve which backend serves a model.
-
-    - "groq/<name>"  → Groq (OpenAI-compatible; prefix stripped before send)
-    - "<vendor>/<name>" → OpenRouter
-    - bare name      → local Ollama
-    """
-    if model.startswith("groq/"):
-        return "groq"
     if "/" in model:
         return "openrouter"
     return "ollama"
@@ -92,7 +82,6 @@ def _is_cloud(model: str | None) -> bool:
 # Per-provider OpenAI-compatible client config: (api_key, base_url)
 _OAI_CONFIG = {
     "openrouter": (OPENROUTER_API_KEY, OPENROUTER_BASE_URL),
-    "groq": (GROQ_API_KEY, GROQ_BASE_URL),
 }
 
 
@@ -155,7 +144,7 @@ def _inject_no_think(messages: list[dict]) -> list[dict]:
 class LLMClient:
     def __init__(self) -> None:
         self._ollama = ollama.Client(host=OLLAMA_BASE_URL)
-        self._oai_clients: dict[str, Any] = {}  # lazy per-provider (openrouter/groq)
+        self._oai_clients: dict[str, Any] = {}  # lazy per-provider
 
     def _oai_client(self, provider: str) -> Any:
         """Lazily build & cache an OpenAI-compatible client for the provider."""
@@ -242,8 +231,7 @@ class LLMClient:
         provider: str,
     ) -> tuple[str, list]:
         oai_msgs = _to_openai_messages(messages)
-        api_model = model.split("/", 1)[1] if provider == "groq" else model
-        kwargs: dict[str, Any] = {"model": api_model, "messages": oai_msgs}
+        kwargs: dict[str, Any] = {"model": model, "messages": oai_msgs}
         if tools:
             kwargs["tools"] = tools
         resp = self._oai_client(provider).chat.completions.create(**kwargs)
@@ -311,9 +299,8 @@ class LLMClient:
         self, messages: list[dict], model: str, provider: str
     ) -> Generator[str, None, None]:
         oai_msgs = _to_openai_messages(messages)
-        api_model = model.split("/", 1)[1] if provider == "groq" else model
         stream = self._oai_client(provider).chat.completions.create(
-            model=api_model,
+            model=model,
             messages=oai_msgs,
             stream=True,
         )
