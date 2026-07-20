@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from typing import Generator
 
@@ -159,9 +160,30 @@ class Agent:
         messages.append({"role": "user", "content": query})
         _, tool_schemas = tools_for_routes(routes)
 
-        # 3. ReAct loop — blocking for tool steps
-        steps = 0
+        # 3a. Fast path — no tools needed → stream the answer live token-by-token
         answer_chunks: list[str] = []
+        if not tool_schemas:
+            for chunk in _llm.chat_stream(
+                messages, model=model, think=think, fallback_model=fallback_model
+            ):
+                answer_chunks.append(chunk)
+                yield chunk
+            answer = "".join(answer_chunks).strip()
+            self.convo.add_turn("user", query)
+            self.convo.add_turn("assistant", answer)
+            self.convo.maybe_summarise(_llm)
+            yield {
+                "type": "done",
+                "citations": _extract_citations(answer),
+                "routes": routes,
+                "steps": 1,
+            }
+            # Fact extraction off the critical path — UI already has its answer
+            threading.Thread(target=_extract_facts, args=(answer,), daemon=True).start()
+            return
+
+        # 3b. ReAct loop — blocking for tool steps
+        steps = 0
         while steps < MAX_REACT_STEPS:
             resp = _llm.chat(
                 messages,
@@ -227,12 +249,12 @@ class Agent:
         self.convo.add_turn("assistant", answer)
         self.convo.maybe_summarise(_llm)
 
-        # 5. Extract facts
-        _extract_facts(answer)
-
         yield {
             "type": "done",
             "citations": _extract_citations(answer),
             "routes": routes,
             "steps": steps,
         }
+
+        # 5. Extract facts off the critical path — UI already has its answer
+        threading.Thread(target=_extract_facts, args=(answer,), daemon=True).start()
