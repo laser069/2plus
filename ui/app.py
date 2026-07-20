@@ -11,7 +11,7 @@ from memory.chat_history import load_session, save_message, delete_session
 from orchestrator.agent import Agent
 import memory.user_facts as uf
 from rag.ingestion import ingest, list_docs
-from config.settings import MODEL_ROUTER, OPENROUTER_API_KEY
+from config.settings import MODEL_ROUTER, OPENROUTER_API_KEY, GROQ_API_KEY
 
 st.set_page_config(page_title="2Plus", page_icon="⚡", layout="wide")
 
@@ -212,6 +212,10 @@ if "think_mode" not in st.session_state:
     st.session_state.think_mode = False
 if "or_model" not in st.session_state:
     st.session_state.or_model = ""
+if "groq_model" not in st.session_state:
+    st.session_state.groq_model = ""
+if "cloud_provider" not in st.session_state:
+    st.session_state.cloud_provider = "openrouter"
 if "inference_mode" not in st.session_state:
     st.session_state.inference_mode = "local"
 
@@ -269,20 +273,48 @@ with st.sidebar:
         if _mode == "auto":
             st.caption("Primary — falls back to cloud if unavailable")
 
-    # ── Cloud model (OpenRouter) ──
+    # ── Cloud model (OpenRouter | Groq) ──
     if _mode in ("cloud", "auto"):
         st.subheader("Cloud Model" if _mode == "cloud" else "Cloud Fallback")
-        st.session_state.or_model = st.text_input(
-            "OpenRouter model",
-            value=st.session_state.or_model,
-            placeholder="anthropic/claude-3.5-sonnet",
-            help="Any OpenRouter model ID in provider/model format",
+
+        _prov_labels = {"openrouter": "OpenRouter", "groq": "Groq"}
+        _prov_list = list(_prov_labels.keys())
+        _prov = st.radio(
+            "Provider",
+            options=_prov_list,
+            format_func=lambda x: _prov_labels[x],
+            index=_prov_list.index(st.session_state.cloud_provider),
+            horizontal=True,
             label_visibility="collapsed",
         )
-        if st.session_state.or_model and not OPENROUTER_API_KEY:
-            st.warning("OPENROUTER_API_KEY missing in .env")
-        if not st.session_state.or_model:
-            st.caption("e.g. openai/gpt-4o · deepseek/deepseek-r1")
+        if _prov != st.session_state.cloud_provider:
+            st.session_state.cloud_provider = _prov
+            st.rerun()
+
+        if _prov == "groq":
+            st.session_state.groq_model = st.text_input(
+                "Groq model",
+                value=st.session_state.groq_model,
+                placeholder="llama-3.3-70b-versatile",
+                help="Any Groq model ID (bare name, no provider prefix)",
+                label_visibility="collapsed",
+            )
+            if st.session_state.groq_model and not GROQ_API_KEY:
+                st.warning("GROQ_API_KEY missing in .env")
+            if not st.session_state.groq_model:
+                st.caption("e.g. llama-3.3-70b-versatile · qwen/qwen3-32b")
+        else:
+            st.session_state.or_model = st.text_input(
+                "OpenRouter model",
+                value=st.session_state.or_model,
+                placeholder="anthropic/claude-3.5-sonnet",
+                help="Any OpenRouter model ID in provider/model format",
+                label_visibility="collapsed",
+            )
+            if st.session_state.or_model and not OPENROUTER_API_KEY:
+                st.warning("OPENROUTER_API_KEY missing in .env")
+            if not st.session_state.or_model:
+                st.caption("e.g. openai/gpt-4o · deepseek/deepseek-r1")
 
     # ── Think mode ──
     st.subheader("Options")
@@ -337,18 +369,24 @@ with st.sidebar:
 
 # ── Active model resolution ───────────────────────────────────────────────────
 _mode = st.session_state.inference_mode
-_or = st.session_state.or_model.strip()
 _local = st.session_state.selected_model
+
+# Resolve the active cloud model string from the selected provider.
+# Groq models are tagged with a "groq/" prefix so the client routes them correctly.
+if st.session_state.cloud_provider == "groq" and st.session_state.groq_model.strip():
+    _cloud = "groq/" + st.session_state.groq_model.strip()
+else:
+    _cloud = st.session_state.or_model.strip()
 
 if _mode == "local":
     _active_model = _local
     _fallback_model = None
 elif _mode == "cloud":
-    _active_model = _or or _local  # graceful fallback if OR field empty
+    _active_model = _cloud or _local  # graceful fallback if cloud field empty
     _fallback_model = None
 else:  # auto
     _active_model = _local
-    _fallback_model = _or or None
+    _fallback_model = _cloud or None
 
 # ── Header ────────────────────────────────────────────────────────────────────
 _MODE_META = {
