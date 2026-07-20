@@ -102,7 +102,7 @@ async def upload_file(file: UploadFile = File(...)):
         text = _pdf_to_text(content)
     else:
         text = content.decode("utf-8", errors="replace")
-    n = await asyncio.get_event_loop().run_in_executor(
+    n = await asyncio.get_running_loop().run_in_executor(
         None, lambda: ingest(text, doc_id=filename, metadata={"filename": filename})
     )
     return {"filename": filename, "chunks": n}
@@ -142,7 +142,7 @@ async def _stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
     meta: dict = {}
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
 
         def _run_agent():
@@ -154,7 +154,7 @@ async def _stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
 
-        loop.run_in_executor(None, _run_agent)
+        _fut = loop.run_in_executor(None, _run_agent)  # noqa: F841 — kept to prevent GC
 
         while True:
             event = await queue.get()
