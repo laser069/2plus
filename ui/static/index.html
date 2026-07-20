@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>2Plus</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <span id="brand">⚡ 2Plus</span>
+        <button id="btn-new-chat" title="New chat">+</button>
+      </div>
+
+      <nav id="session-list-wrap">
+        <div class="section-label">Chats</div>
+        <ul id="session-list"></ul>
+      </nav>
+
+      <div id="sidebar-settings">
+        <div class="section-label">Inference</div>
+        <div id="mode-switcher">
+          <button class="mode-btn active" data-mode="local">LOCAL</button>
+          <button class="mode-btn" data-mode="auto">AUTO</button>
+          <button class="mode-btn" data-mode="cloud">CLOUD</button>
+        </div>
+
+        <div id="local-model-wrap">
+          <div class="section-label">Local Model</div>
+          <select id="select-model"></select>
+        </div>
+
+        <div id="cloud-model-wrap" class="hidden">
+          <div class="section-label">Cloud Model</div>
+          <input id="input-cloud-model" type="text" placeholder="anthropic/claude-3.5-sonnet" />
+        </div>
+
+        <div id="options-wrap">
+          <div class="section-label">Options</div>
+          <label class="toggle-label">
+            <input type="checkbox" id="toggle-think" />
+            <span>Think mode</span>
+          </label>
+        </div>
+
+        <div id="docs-wrap">
+          <div class="section-label">Documents</div>
+          <input type="file" id="file-upload" accept=".txt,.md,.pdf" multiple />
+          <div id="docs-list"></div>
+        </div>
+
+        <div id="facts-wrap">
+          <div class="section-label">Memory</div>
+          <div id="facts-list" class="dim">No facts yet.</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main id="main">
+      <header id="chat-header">
+        <span id="header-title">2Plus</span>
+        <div id="header-right">
+          <span id="mode-badge"></span>
+          <button id="btn-export" title="Export chat">↓ Export</button>
+        </div>
+      </header>
+
+      <div id="messages"></div>
+
+      <div id="input-bar">
+        <textarea id="chat-input" placeholder="Ask me anything…" rows="1"></textarea>
+        <button id="btn-send">Send</button>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
