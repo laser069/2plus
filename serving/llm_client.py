@@ -14,6 +14,8 @@ from config.settings import (
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
+    GROQ_API_KEY,
+    GROQ_BASE_URL,
 )
 from config.logging_config import setup_logging
 
@@ -68,9 +70,30 @@ def _log_call(model: str, kind: str, latency_ms: float, success: bool, chars_in:
         f.write(json.dumps(entry) + "\n")
 
 
-def _is_openrouter(model: str) -> bool:
-    """OpenRouter models always use provider/model-name format."""
-    return "/" in model
+def _provider(model: str) -> str:
+    """Resolve which backend serves a model.
+
+    - "groq/<name>"  → Groq (OpenAI-compatible; prefix stripped before send)
+    - "<vendor>/<name>" → OpenRouter
+    - bare name      → local Ollama
+    """
+    if model.startswith("groq/"):
+        return "groq"
+    if "/" in model:
+        return "openrouter"
+    return "ollama"
+
+
+def _is_cloud(model: str | None) -> bool:
+    """True for any non-Ollama (cloud) model string."""
+    return bool(model) and _provider(model) != "ollama"
+
+
+# Per-provider OpenAI-compatible client config: (api_key, base_url)
+_OAI_CONFIG = {
+    "openrouter": (OPENROUTER_API_KEY, OPENROUTER_BASE_URL),
+    "groq": (GROQ_API_KEY, GROQ_BASE_URL),
+}
 
 
 def _to_openai_messages(messages: list[dict]) -> list[dict]:
@@ -132,22 +155,20 @@ def _inject_no_think(messages: list[dict]) -> list[dict]:
 class LLMClient:
     def __init__(self) -> None:
         self._ollama = ollama.Client(host=OLLAMA_BASE_URL)
-        self._openai_client: Any = None  # lazy-init on first OpenRouter call
+        self._oai_clients: dict[str, Any] = {}  # lazy per-provider (openrouter/groq)
 
-    @property
-    def _or_client(self) -> Any:
-        if self._openai_client is None:
-            if not OPENROUTER_API_KEY:
+    def _oai_client(self, provider: str) -> Any:
+        """Lazily build & cache an OpenAI-compatible client for the provider."""
+        if provider not in self._oai_clients:
+            api_key, base_url = _OAI_CONFIG[provider]
+            if not api_key:
                 raise RuntimeError(
-                    "OPENROUTER_API_KEY is not set in .env — "
-                    "add it to use OpenRouter models."
+                    f"{provider.upper()}_API_KEY is not set in .env — "
+                    f"add it to use {provider} models."
                 )
             from openai import OpenAI
-            self._openai_client = OpenAI(
-                base_url=OPENROUTER_BASE_URL,
-                api_key=OPENROUTER_API_KEY,
-            )
-        return self._openai_client
+            self._oai_clients[provider] = OpenAI(base_url=base_url, api_key=api_key)
+        return self._oai_clients[provider]
 
     # ── chat ─────────────────────────────────────────────────────────────────
 
@@ -164,15 +185,18 @@ class LLMClient:
         t0 = time.perf_counter()
         success = False
         try:
-            if _is_openrouter(model):
-                content, tool_calls = self._chat_openrouter(messages, model, tools)
+            prov = _provider(model)
+            if prov != "ollama":
+                content, tool_calls = self._chat_openai(messages, model, tools, prov)
             else:
                 try:
                     content, tool_calls = self._chat_ollama(messages, model, tools, think)
                 except Exception as ollama_exc:
-                    if fallback_model and _is_openrouter(fallback_model):
+                    if _is_cloud(fallback_model):
                         logger.warning(f"Ollama failed → falling back to {fallback_model} | {ollama_exc!s:.80}")
-                        content, tool_calls = self._chat_openrouter(messages, fallback_model, tools)
+                        content, tool_calls = self._chat_openai(
+                            messages, fallback_model, tools, _provider(fallback_model)
+                        )
                         model = fallback_model
                     else:
                         raise
@@ -210,17 +234,19 @@ class LLMClient:
             tcs.append(_ToolCall(tc.function.name, tc.function.arguments or {}))
         return msg.content or "", tcs
 
-    def _chat_openrouter(
+    def _chat_openai(
         self,
         messages: list[dict],
         model: str,
         tools: list[dict] | None,
+        provider: str,
     ) -> tuple[str, list]:
         oai_msgs = _to_openai_messages(messages)
-        kwargs: dict[str, Any] = {"model": model, "messages": oai_msgs}
+        api_model = model.split("/", 1)[1] if provider == "groq" else model
+        kwargs: dict[str, Any] = {"model": api_model, "messages": oai_msgs}
         if tools:
             kwargs["tools"] = tools
-        resp = self._or_client.chat.completions.create(**kwargs)
+        resp = self._oai_client(provider).chat.completions.create(**kwargs)
         msg = resp.choices[0].message
         content = msg.content or ""
         tcs = []
@@ -249,15 +275,18 @@ class LLMClient:
         success = False
         logger.info(f"stream {model}  start")
         try:
-            if _is_openrouter(model):
-                yield from self._stream_openrouter(messages, model)
+            prov = _provider(model)
+            if prov != "ollama":
+                yield from self._stream_openai(messages, model, prov)
             else:
                 try:
                     yield from self._stream_ollama(messages, model, think)
                 except Exception as ollama_exc:
-                    if fallback_model and _is_openrouter(fallback_model):
+                    if _is_cloud(fallback_model):
                         logger.warning(f"Ollama stream failed → falling back to {fallback_model}")
-                        yield from self._stream_openrouter(messages, fallback_model)
+                        yield from self._stream_openai(
+                            messages, fallback_model, _provider(fallback_model)
+                        )
                     else:
                         raise ollama_exc
             success = True
@@ -278,12 +307,13 @@ class LLMClient:
             if delta:
                 yield delta
 
-    def _stream_openrouter(
-        self, messages: list[dict], model: str
+    def _stream_openai(
+        self, messages: list[dict], model: str, provider: str
     ) -> Generator[str, None, None]:
         oai_msgs = _to_openai_messages(messages)
-        stream = self._or_client.chat.completions.create(
-            model=model,
+        api_model = model.split("/", 1)[1] if provider == "groq" else model
+        stream = self._oai_client(provider).chat.completions.create(
+            model=api_model,
             messages=oai_msgs,
             stream=True,
         )
