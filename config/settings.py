@@ -19,6 +19,10 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# --- Groq (OpenAI-compatible) ---
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
 # --- Paths ---
 BASE_DIR         = Path(__file__).resolve().parent.parent
 DATA_DIR         = BASE_DIR / "data"
