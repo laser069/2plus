@@ -18,9 +18,13 @@ from config.settings import (
     MODEL_ROUTER,
     OLLAMA_BASE_URL,
     OLLAMA_KEEP_ALIVE,
+    OLLAMA_NUM_PREDICT,
+    OLLAMA_TIMEOUT_S,
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
+    OPENROUTER_TIMEOUT_S,
+    OPENROUTER_MAX_TOKENS,
 )
 from config.logging_config import setup_logging
 
@@ -154,41 +158,30 @@ def _from_lc_tool_calls(ai_msg: AIMessage) -> list[_ToolCall]:
     return tcs
 
 
-def _inject_no_think(messages: list[dict]) -> list[dict]:
-    """Prepend /no_think to first user message (Qwen3-specific directive)."""
-    msgs = list(messages)
-    for i, m in enumerate(msgs):
-        if m["role"] == "user" and "/no_think" not in (m.get("content") or ""):
-            msgs[i] = {**m, "content": "/no_think\n" + (m["content"] or "")}
-            break
-    return msgs
-
-
-def inject_no_think_lc(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """LangChain-message counterpart of _inject_no_think, for callers (e.g. the
-    ReAct agent loop) that work with BaseMessage lists directly."""
-    msgs = list(messages)
-    for i, m in enumerate(msgs):
-        if isinstance(m, HumanMessage) and "/no_think" not in (m.content or ""):
-            msgs[i] = HumanMessage(content="/no_think\n" + (m.content or ""))
-            break
-    return msgs
-
-
 # ── LLMClient ─────────────────────────────────────────────────────────────────
 
 class LLMClient:
     def __init__(self) -> None:
-        self._ollama_chat_models: dict[str, ChatOllama] = {}  # keyed by model name
+        self._ollama_chat_models: dict[tuple[str, bool], ChatOllama] = {}  # keyed by (model, think)
         self._oai_chat_models: dict[str, ChatOpenAI] = {}     # keyed by "provider::model"
         self._embeddings: dict[str, OllamaEmbeddings] = {}
 
-    def _ollama_chat(self, model: str) -> ChatOllama:
-        if model not in self._ollama_chat_models:
-            self._ollama_chat_models[model] = ChatOllama(
-                model=model, base_url=OLLAMA_BASE_URL, keep_alive=OLLAMA_KEEP_ALIVE
+    def _ollama_chat(self, model: str, think: bool = False) -> ChatOllama:
+        """`think` uses Ollama's native reasoning toggle. The previous approach —
+        prepending a "/no_think" directive to the prompt — is a Qwen3-only
+        convention that Qwen3.5 ignores, silently burning the whole num_predict
+        budget on hidden reasoning tokens before ever emitting an answer."""
+        key = (model, think)
+        if key not in self._ollama_chat_models:
+            self._ollama_chat_models[key] = ChatOllama(
+                model=model,
+                base_url=OLLAMA_BASE_URL,
+                keep_alive=OLLAMA_KEEP_ALIVE,
+                num_predict=OLLAMA_NUM_PREDICT,
+                client_kwargs={"timeout": OLLAMA_TIMEOUT_S},
+                reasoning=think,
             )
-        return self._ollama_chat_models[model]
+        return self._ollama_chat_models[key]
 
     def _oai_chat(self, model: str, provider: str) -> ChatOpenAI:
         key = f"{provider}::{model}"
@@ -199,7 +192,13 @@ class LLMClient:
                     f"{provider.upper()}_API_KEY is not set in .env — "
                     f"add it to use {provider} models."
                 )
-            self._oai_chat_models[key] = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
+            self._oai_chat_models[key] = ChatOpenAI(
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=OPENROUTER_TIMEOUT_S,
+                max_tokens=OPENROUTER_MAX_TOKENS,
+            )
         return self._oai_chat_models[key]
 
     def _embedder(self, model: str) -> OllamaEmbeddings:
@@ -218,7 +217,7 @@ class LLMClient:
             return
         try:
             t0 = time.perf_counter()
-            self._ollama_chat(model).invoke([HumanMessage(content="/no_think\nhi")])
+            self._ollama_chat(model, think=False).invoke([HumanMessage(content="hi")])
             logger.info(f"warm {model}  {(time.perf_counter() - t0) * 1000:.0f}ms")
         except Exception as exc:
             logger.warning(f"warm failed ({model}): {exc}")
@@ -230,6 +229,7 @@ class LLMClient:
         model: str | None = None,
         tools: list | None = None,
         fallback_model: str | None = None,
+        think: bool = False,
     ):
         """Return a LangChain chat Runnable bound with `tools`, wired with a
         native `.with_fallbacks()` cloud fallback when `fallback_model` is set.
@@ -242,7 +242,7 @@ class LLMClient:
             chat_model = self._oai_chat(model, prov)
             return chat_model.bind_tools(tools) if tools else chat_model
 
-        primary = self._ollama_chat(model)
+        primary = self._ollama_chat(model, think=think)
         if tools:
             primary = primary.bind_tools(tools)
 
@@ -306,10 +306,8 @@ class LLMClient:
         tools: list[dict] | None,
         think: bool,
     ) -> tuple[str, list]:
-        if not think:
-            messages = _inject_no_think(messages)
         lc_messages = _to_lc_messages(messages)
-        chat_model = self._ollama_chat(model)
+        chat_model = self._ollama_chat(model, think=think)
         if tools:
             chat_model = chat_model.bind_tools(tools)
         resp = chat_model.invoke(lc_messages)
@@ -381,10 +379,8 @@ class LLMClient:
     def _stream_ollama(
         self, messages: list[dict], model: str, think: bool
     ) -> Generator[str, None, None]:
-        if not think:
-            messages = _inject_no_think(messages)
         lc_messages = _to_lc_messages(messages)
-        for chunk in self._ollama_chat(model).stream(lc_messages):
+        for chunk in self._ollama_chat(model, think=think).stream(lc_messages):
             delta = chunk.content or ""
             if delta:
                 yield delta

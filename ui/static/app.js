@@ -283,11 +283,20 @@ async function sendMessage(query) {
     fallback_model: resolveFallback(),
   });
 
+  const STREAM_IDLE_TIMEOUT_MS = 90000;
+  const controller = new AbortController();
+  let idleTimer = null;
+  const armIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => controller.abort(), STREAM_IDLE_TIMEOUT_MS);
+  };
+
   try {
     const resp = await fetch('/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
+      signal: controller.signal,
     });
 
     if (!resp.ok) throw new Error(`${resp.status}`);
@@ -296,8 +305,10 @@ async function sendMessage(query) {
     const decoder = new TextDecoder();
     let buf = '';
 
+    armIdleTimer();
     while (true) {
       const { done, value } = await reader.read();
+      armIdleTimer();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
@@ -314,9 +325,11 @@ async function sendMessage(query) {
       }
     }
   } catch (err) {
-    handle.setStatus(`Error: ${err.message}`);
+    const msg = err.name === 'AbortError' ? 'timed out waiting for a response' : err.message;
+    handle.setStatus(`Error: ${msg}`);
     handle.finalize([]);
   } finally {
+    clearTimeout(idleTimer);
     state.streaming = false;
     updateSendBtn();
   }

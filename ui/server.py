@@ -24,10 +24,18 @@ from memory.chat_history import (
 )
 from memory.convo import ConvoMemory
 import memory.user_facts as uf
-from orchestrator.agent import Agent
+from orchestrator.agent import Agent, _llm
 from rag.ingestion import ingest, list_docs
 
 app = FastAPI(title="2Plus")
+
+
+@app.on_event("startup")
+async def _warm_default_model() -> None:
+    """Preload the default chat model into VRAM before accepting traffic, so
+    the first real user request doesn't race the warm-up call and queue
+    behind it on Ollama's single-model-load serialization."""
+    await asyncio.get_running_loop().run_in_executor(None, _llm.warm)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
