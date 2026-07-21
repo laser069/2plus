@@ -101,25 +101,30 @@ User Input
 
 ## LangChain Integration
 
-2Plus uses [LangChain](https://python.langchain.com/) as the LLM-calling layer inside `serving/llm_client.py`, not as an agent framework. `LLMClient` is a thin, provider-agnostic wrapper that was previously built directly on the raw `ollama` and `openai` SDKs; it is now backed by LangChain's chat model and embeddings classes instead, while keeping the exact same public interface (`chat()`, `chat_stream()`, `embed()`) so no other module had to change.
+2Plus uses [LangChain](https://python.langchain.com/) across the LLM-calling layer, the ReAct agent loop, RAG storage, and conversation memory — while keeping its own hand-rolled router, prompts, SSE streaming contract, and step/budget control flow (LangChain is used for its primitives, not as a full agent framework like LangGraph's `AgentExecutor`).
 
 **What LangChain is used for:**
 
 | Concern | LangChain class | Notes |
 |---------|-----------------|-------|
-| Local chat (Ollama) | `langchain_ollama.ChatOllama` | Replaces raw `ollama.Client().chat()` |
-| Cloud chat (OpenRouter) | `langchain_openai.ChatOpenAI` | Points at OpenRouter via `base_url` override, same as before |
-| Local embeddings | `langchain_ollama.OllamaEmbeddings` | Replaces raw `ollama.Client().embeddings()` |
-| Tool binding | `.bind_tools(schemas)` | The existing OpenAI-function-format schemas from `tools/registry.py` bind unchanged |
+| Local chat (Ollama) | `langchain_ollama.ChatOllama` | `serving/llm_client.py` |
+| Cloud chat (OpenRouter) | `langchain_openai.ChatOpenAI` | Points at OpenRouter via `base_url` override |
+| Local embeddings | `langchain_ollama.OllamaEmbeddings` | `serving/llm_client.py`, `rag/ingestion.py`, `rag/retrieval.py` |
+| ReAct tool-calling loop | `BaseMessage`/`AIMessage`/`ToolMessage`, `.bind_tools()` | `orchestrator/agent.py` operates on LangChain messages natively — no dict↔message conversion at this layer |
+| Ollama→cloud fallback | `Runnable.with_fallbacks()` | `LLMClient.get_chat_model()` binds tools then wraps with a native fallback runnable, replacing a manual try/except |
+| Tool schemas | `langchain_core.tools.StructuredTool` | `tools/registry.py` builds a pydantic `args_schema` per tool from its JSON-schema `parameters` |
+| RAG vector store | `langchain_chroma.Chroma` | `rag/ingestion.py`, `rag/retrieval.py` — replaces the raw `chromadb.PersistentClient` |
+| Document chunking | `langchain_text_splitters.RecursiveCharacterTextSplitter` | Replaces fixed-size manual chunking |
+| Conversation window | `langchain_core.messages.trim_messages` | `memory/convo.py` — `token_counter=len` makes it a message-count window (matches `CONVO_WINDOW`) instead of a token budget |
 
-**What LangChain does *not* touch** (deliberately left as hand-rolled code, since it already works and has no clear win from a framework rewrite):
+**What stays hand-rolled** (no clear win from a framework rewrite):
 
-- The **ReAct loop** (`orchestrator/agent.py`) — step limits, character-budget tracking, streaming, citation extraction, and Ollama→cloud fallback are all custom control flow, not a LangGraph `AgentExecutor`.
-- The **router** (`orchestrator/router.py`) — a single prompt + regex classification, not a LangChain output parser.
-- **RAG storage** (`rag/ingestion.py`, `rag/retrieval.py`) — raw `chromadb.PersistentClient` calls, not `langchain_chroma`.
-- **Memory** (`memory/convo.py`, `memory/user_facts.py`) — raw SQLite, not LangChain memory classes.
+- The **router** (`orchestrator/router.py`) — a single prompt + regex classification.
+- The **ReAct loop's control flow** (`orchestrator/agent.py`) — step limits, character-budget tracking, SSE event yielding, and citation extraction are custom, even though the messages and tool calls flowing through it are now LangChain-native.
+- **User facts** (`memory/user_facts.py`) and **chat history persistence** (`memory/chat_history.py`) — raw SQLite key/value and message-log tables; there's no LangChain abstraction that fits these better than direct SQL.
+- The **rolling conversation summary** itself (`memory/convo.py`) — still a custom LLM-summarization prompt, LangChain's `trim_messages` only decides *which* messages get folded into it.
 
-Internally, `LLMClient` converts the canonical `{"role": ..., "content": ...}` message dicts used throughout the codebase into LangChain `BaseMessage` objects (`SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`) before invoking a chat model, and converts the returned `AIMessage.tool_calls` back into the same `_ToolCall`/`ChatResponse` shapes the rest of the app already expects. Custom behaviors preserved across the swap: `/no_think` prompt injection for Qwen3, Ollama→OpenRouter fallback on failure, and structured call logging to `logs/calls.jsonl`.
+Custom behaviors preserved throughout: `/no_think` prompt injection for Qwen3 (`inject_no_think_lc`), structured call logging to `logs/calls.jsonl`, and the exact SSE event contract (`routing`/`tool`/`token`/`done`) the web UI depends on.
 
 ---
 
@@ -183,13 +188,23 @@ ollama list
 
 ## Running 2Plus
 
-### Streamlit UI (recommended)
+### Web UI (recommended)
+
+FastAPI backend with SSE streaming (`ui/server.py`) + a responsive vanilla JS/HTML/CSS frontend (`ui/static/`). Chats persist to SQLite and reload across server restarts; sessions can be created, switched, and deleted from the sidebar (a collapsible off-canvas drawer below 768px).
+
+```bash
+uvicorn ui.server:app --reload --port 8000
+```
+
+Open your browser at `http://localhost:8000`.
+
+### Streamlit UI (legacy fallback)
 
 ```bash
 streamlit run ui/app.py
 ```
 
-Open your browser at `http://localhost:8501`.
+Open your browser at `http://localhost:8501`. Kept for parity/fallback; the web UI above is the primary, actively developed interface.
 
 ### CLI Chat Mode
 
@@ -328,7 +343,12 @@ Some smaller or older models on OpenRouter do not reliably follow function-calli
 │   └── agent.py             # ReAct loop: routes → context → tools → answer
 │
 ├── ui/
-│   └── app.py               # Streamlit chat UI with sidebar for docs and memory
+│   ├── app.py               # Streamlit chat UI (legacy fallback)
+│   ├── server.py            # FastAPI backend: sessions, SSE chat streaming, uploads
+│   └── static/              # Vanilla JS/HTML/CSS web frontend (primary UI)
+│       ├── index.html
+│       ├── app.js
+│       └── style.css
 │
 ├── data/                    # Auto-created: ChromaDB files + SQLite DB
 ├── logs/                    # Auto-created: calls.jsonl + 2plus.log
@@ -802,13 +822,15 @@ pip install ddgs
 
 ## Roadmap
 
-- [ ] Streaming responses in the Streamlit UI
-- [ ] PDF text extraction via `pypdf`
+- [x] Streaming responses (SSE) via the FastAPI + web UI stack
+- [x] Responsive web UI (off-canvas sidebar drawer below 768px)
+- [x] Server-restart-durable sessions (ConvoMemory rehydrated from SQLite on cache miss)
 - [ ] Reranker support (`bge-reranker`) for improved RAG quality
 - [x] Cloud model routing via OpenRouter (opt-in per conversation)
 - [x] LangChain-backed LLM calling layer (`ChatOllama`/`ChatOpenAI`/`OllamaEmbeddings`)
+- [x] LangChain-native ReAct tool-calling loop, RAG vector store, and conversation window
 - [ ] Vector-based chat history recall for fuzzy "what did we discuss" queries
 - [ ] Playwright fallback for JavaScript-heavy pages
-- [ ] Multi-user session support
+- [ ] Multi-user session support (auth; `_sessions` cache is currently single-process/no-auth)
 - [ ] Langfuse integration for production observability
 - [ ] `langchain_chroma` vectorstore for RAG ingestion/retrieval (currently raw ChromaDB client)

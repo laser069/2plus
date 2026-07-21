@@ -2,7 +2,8 @@
 2Plus — entry point.
 
 Usage:
-  streamlit run ui/app.py          # launch Streamlit UI
+  uvicorn ui.server:app --reload   # launch the web UI (recommended)
+  streamlit run ui/app.py          # launch Streamlit UI (legacy fallback)
   python main.py --test-llm        # smoke test LLM + embeddings
   python main.py --test-rag        # smoke test RAG ingestion + retrieval
   python main.py --test-browser    # smoke test DuckDuckGo search + fetch
