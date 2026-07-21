@@ -23,6 +23,8 @@ from config.settings import (
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
+    OPENROUTER_TIMEOUT_S,
+    OPENROUTER_MAX_TOKENS,
 )
 from config.logging_config import setup_logging
 
@@ -190,7 +192,13 @@ class LLMClient:
                     f"{provider.upper()}_API_KEY is not set in .env — "
                     f"add it to use {provider} models."
                 )
-            self._oai_chat_models[key] = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
+            self._oai_chat_models[key] = ChatOpenAI(
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=OPENROUTER_TIMEOUT_S,
+                max_tokens=OPENROUTER_MAX_TOKENS,
+            )
         return self._oai_chat_models[key]
 
     def _embedder(self, model: str) -> OllamaEmbeddings:

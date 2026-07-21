@@ -26,6 +26,10 @@ OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "120"))
 # --- OpenRouter ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Same rationale as OLLAMA_TIMEOUT_S/OLLAMA_NUM_PREDICT: without these, a
+# stalled OpenRouter call hangs the ReAct loop's synthesis step forever.
+OPENROUTER_TIMEOUT_S = float(os.getenv("OPENROUTER_TIMEOUT_S", "120"))
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "1024"))
 
 # --- Paths ---
 BASE_DIR         = Path(__file__).resolve().parent.parent
