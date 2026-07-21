@@ -9,31 +9,33 @@ A fully local, privacy-first AI assistant that combines retrieval-augmented gene
 1. [Overview](#overview)
 2. [Features](#features)
 3. [Architecture](#architecture)
-4. [Prerequisites](#prerequisites)
-5. [Installation](#installation)
-6. [Running 2Plus](#running-2plus)
-7. [OpenRouter Integration](#openrouter-integration)
-8. [Project Structure](#project-structure)
-9. [Module Reference](#module-reference)
-10. [Configuration](#configuration)
-11. [How It Works](#how-it-works)
-12. [Context Budget System](#context-budget-system)
-13. [Git Branch Strategy](#git-branch-strategy)
-14. [Smoke Tests](#smoke-tests)
-15. [Troubleshooting](#troubleshooting)
-16. [Roadmap](#roadmap)
+4. [LangChain Integration](#langchain-integration)
+5. [Prerequisites](#prerequisites)
+6. [Installation](#installation)
+7. [Running 2Plus](#running-2plus)
+8. [OpenRouter Integration](#openrouter-integration)
+9. [Project Structure](#project-structure)
+10. [Module Reference](#module-reference)
+11. [Configuration](#configuration)
+12. [How It Works](#how-it-works)
+13. [Context Budget System](#context-budget-system)
+14. [Git Branch Strategy](#git-branch-strategy)
+15. [Smoke Tests](#smoke-tests)
+16. [Troubleshooting](#troubleshooting)
+17. [Roadmap](#roadmap)
 
 ---
 
 ## Overview
 
-2Plus is built around a **ReAct (Reason + Act)** agent loop that intelligently decides when to search your documents, browse the web, recall stored facts, or answer directly from its own knowledge. It runs primarily on [Ollama](https://ollama.com/) for fully local LLM inference, with optional cloud routing to any model on [OpenRouter](https://openrouter.ai/) when you need stronger reasoning or larger context windows.
+2Plus is built around a **ReAct (Reason + Act)** agent loop that intelligently decides when to search your documents, browse the web, recall stored facts, or answer directly from its own knowledge. It runs primarily on [Ollama](https://ollama.com/) for fully local LLM inference, with optional cloud routing to any model on [OpenRouter](https://openrouter.ai/) when you need stronger reasoning or larger context windows. Chat and embedding calls go through [LangChain](https://python.langchain.com/) chat model wrappers (`ChatOllama`, `ChatOpenAI`, `OllamaEmbeddings`) for standardized message and tool-calling handling — the ReAct loop itself, routing, RAG storage, and memory remain hand-rolled (see [LangChain Integration](#langchain-integration)).
 
 **Primary model:** `qwen3:8b`  
 **Embeddings model:** `all-minilm:l6-v2`  
 **Vector database:** ChromaDB (local persistent)  
 **Fact store:** SQLite  
 **Web search:** DuckDuckGo (no API key)  
+**LLM layer:** LangChain (`langchain-ollama`, `langchain-openai`)  
 **UI:** Streamlit
 
 ---
@@ -94,6 +96,30 @@ User Input
 │            add turn to convo memory                 │
 └─────────────────────────────────────────────────────┘
 ```
+
+---
+
+## LangChain Integration
+
+2Plus uses [LangChain](https://python.langchain.com/) as the LLM-calling layer inside `serving/llm_client.py`, not as an agent framework. `LLMClient` is a thin, provider-agnostic wrapper that was previously built directly on the raw `ollama` and `openai` SDKs; it is now backed by LangChain's chat model and embeddings classes instead, while keeping the exact same public interface (`chat()`, `chat_stream()`, `embed()`) so no other module had to change.
+
+**What LangChain is used for:**
+
+| Concern | LangChain class | Notes |
+|---------|-----------------|-------|
+| Local chat (Ollama) | `langchain_ollama.ChatOllama` | Replaces raw `ollama.Client().chat()` |
+| Cloud chat (OpenRouter) | `langchain_openai.ChatOpenAI` | Points at OpenRouter via `base_url` override, same as before |
+| Local embeddings | `langchain_ollama.OllamaEmbeddings` | Replaces raw `ollama.Client().embeddings()` |
+| Tool binding | `.bind_tools(schemas)` | The existing OpenAI-function-format schemas from `tools/registry.py` bind unchanged |
+
+**What LangChain does *not* touch** (deliberately left as hand-rolled code, since it already works and has no clear win from a framework rewrite):
+
+- The **ReAct loop** (`orchestrator/agent.py`) — step limits, character-budget tracking, streaming, citation extraction, and Ollama→cloud fallback are all custom control flow, not a LangGraph `AgentExecutor`.
+- The **router** (`orchestrator/router.py`) — a single prompt + regex classification, not a LangChain output parser.
+- **RAG storage** (`rag/ingestion.py`, `rag/retrieval.py`) — raw `chromadb.PersistentClient` calls, not `langchain_chroma`.
+- **Memory** (`memory/convo.py`, `memory/user_facts.py`) — raw SQLite, not LangChain memory classes.
+
+Internally, `LLMClient` converts the canonical `{"role": ..., "content": ...}` message dicts used throughout the codebase into LangChain `BaseMessage` objects (`SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`) before invoking a chat model, and converts the returned `AIMessage.tool_calls` back into the same `_ToolCall`/`ChatResponse` shapes the rest of the app already expects. Custom behaviors preserved across the swap: `/no_think` prompt injection for Qwen3, Ollama→OpenRouter fallback on failure, and structured call logging to `logs/calls.jsonl`.
 
 ---
 
@@ -343,7 +369,7 @@ Central configuration file. All tuneable constants live here.
 
 **`LLMClient`**
 
-A thin wrapper around the `ollama` Python package. All model calls go through this class so the underlying provider can be swapped in one place.
+A thin, provider-agnostic wrapper backed by [LangChain](https://python.langchain.com/) chat models (`ChatOllama`, `ChatOpenAI`) and `OllamaEmbeddings`. All model calls go through this class so the underlying provider — and now the underlying LLM framework — can be swapped in one place. See [LangChain Integration](#langchain-integration) for what LangChain does and doesn't touch.
 
 ```python
 from serving.llm_client import LLMClient
@@ -354,7 +380,7 @@ llm = LLMClient()
 response = llm.chat(
     messages=[{"role": "user", "content": "Hello"}],
     model="qwen3:8b",   # defaults to MODEL_ROUTER["default"]
-    tools=None,         # optional Ollama-format tool list
+    tools=None,         # optional OpenAI-function-format tool list, bound via .bind_tools()
     think=False,        # True enables chain-of-thought (Qwen3 thinking mode)
 )
 print(response.content)
@@ -368,6 +394,7 @@ vector = llm.embed("Some text to embed")
 **Behaviour notes:**
 - `think=False` (default): prepends `/no_think` to the first user message, disabling Qwen3's chain-of-thought mode for faster responses.
 - `think=True`: lets Qwen3 reason internally before answering — useful for complex multi-step problems.
+- Canonical `{"role": ..., "content": ...}` message dicts are converted to LangChain `BaseMessage` objects internally; `AIMessage.tool_calls` are converted back to the app's own `_ToolCall`/`ChatResponse` shapes, so callers never see LangChain types directly.
 - Every call writes a structured log entry to `logs/calls.jsonl`.
 
 ---
@@ -779,7 +806,9 @@ pip install ddgs
 - [ ] PDF text extraction via `pypdf`
 - [ ] Reranker support (`bge-reranker`) for improved RAG quality
 - [x] Cloud model routing via OpenRouter (opt-in per conversation)
+- [x] LangChain-backed LLM calling layer (`ChatOllama`/`ChatOpenAI`/`OllamaEmbeddings`)
 - [ ] Vector-based chat history recall for fuzzy "what did we discuss" queries
 - [ ] Playwright fallback for JavaScript-heavy pages
 - [ ] Multi-user session support
 - [ ] Langfuse integration for production observability
+- [ ] `langchain_chroma` vectorstore for RAG ingestion/retrieval (currently raw ChromaDB client)
