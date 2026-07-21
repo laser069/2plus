@@ -154,6 +154,17 @@ def _inject_no_think(messages: list[dict]) -> list[dict]:
     return msgs
 
 
+def inject_no_think_lc(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """LangChain-message counterpart of _inject_no_think, for callers (e.g. the
+    ReAct agent loop) that work with BaseMessage lists directly."""
+    msgs = list(messages)
+    for i, m in enumerate(msgs):
+        if isinstance(m, HumanMessage) and "/no_think" not in (m.content or ""):
+            msgs[i] = HumanMessage(content="/no_think\n" + (m.content or ""))
+            break
+    return msgs
+
+
 # ── LLMClient ─────────────────────────────────────────────────────────────────
 
 class LLMClient:
@@ -183,6 +194,38 @@ class LLMClient:
         if model not in self._embeddings:
             self._embeddings[model] = OllamaEmbeddings(model=model, base_url=OLLAMA_BASE_URL)
         return self._embeddings[model]
+
+    # ── native LangChain chat model access (for the ReAct agent loop) ──────────
+
+    def get_chat_model(
+        self,
+        model: str | None = None,
+        tools: list | None = None,
+        fallback_model: str | None = None,
+    ):
+        """Return a LangChain chat Runnable bound with `tools`, wired with a
+        native `.with_fallbacks()` cloud fallback when `fallback_model` is set.
+        Used by the agent's ReAct loop, which works with BaseMessage lists and
+        AIMessage.tool_calls directly rather than through chat()/chat_stream()."""
+        model = model or MODEL_ROUTER["default"]
+        prov = _provider(model)
+
+        if prov != "ollama":
+            chat_model = self._oai_chat(model, prov)
+            return chat_model.bind_tools(tools) if tools else chat_model
+
+        primary = self._ollama_chat(model)
+        if tools:
+            primary = primary.bind_tools(tools)
+
+        if fallback_model and _is_cloud(fallback_model):
+            fb_prov = _provider(fallback_model)
+            fallback = self._oai_chat(fallback_model, fb_prov)
+            if tools:
+                fallback = fallback.bind_tools(tools)
+            return primary.with_fallbacks([fallback])
+
+        return primary
 
     # ── chat ─────────────────────────────────────────────────────────────────
 

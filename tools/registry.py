@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from typing import Callable, Any
 import json
 
+from langchain_core.tools import StructuredTool
+from pydantic import create_model, Field
+
 from tools.browser import search_web, fetch_page
 from tools.rag_tool import search_docs
 import memory.user_facts as uf
@@ -126,3 +129,38 @@ def tools_for_routes(routes: list[str]) -> tuple[list[Tool], list[dict]]:
     active = [t for t in TOOL_REGISTRY.values() if any(r in routes for r in t.routes)]
     schemas = [_ollama_tool_schema(t) for t in active]
     return active, schemas
+
+
+_JSON_TYPE_MAP = {"string": str, "integer": int, "number": float, "boolean": bool}
+
+
+def _args_schema(tool: Tool):
+    """Build a pydantic args model from a Tool's JSON-schema parameters, for
+    binding as a LangChain StructuredTool."""
+    props = tool.parameters.get("properties", {})
+    required = set(tool.parameters.get("required", []))
+    fields = {}
+    for name, spec in props.items():
+        py_type = _JSON_TYPE_MAP.get(spec.get("type"), str)
+        description = spec.get("description", "")
+        if name in required:
+            fields[name] = (py_type, Field(..., description=description))
+        else:
+            fields[name] = (py_type, Field(spec.get("default"), description=description))
+    return create_model(f"{tool.name}_Args", **fields)
+
+
+def _to_structured_tool(tool: Tool) -> StructuredTool:
+    return StructuredTool.from_function(
+        func=tool.handler,
+        name=tool.name,
+        description=tool.description,
+        args_schema=_args_schema(tool),
+    )
+
+
+def lc_tools_for_routes(routes: list[str]) -> list[StructuredTool]:
+    """Return LangChain StructuredTool objects for the given route tags, for
+    binding via chat_model.bind_tools() in the ReAct agent loop."""
+    active = [t for t in TOOL_REGISTRY.values() if any(r in routes for r in t.routes)]
+    return [_to_structured_tool(t) for t in active]
