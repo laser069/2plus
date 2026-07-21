@@ -6,7 +6,7 @@ load_dotenv()
 
 # --- Model router ---
 MODEL_ROUTER = {
-    "default": "qwen3:8b",
+    "default": "qwen3.5:4b",
     "fast":    "qwen3.5:4b",
     "embed":   "all-minilm:l6-v2",
     "cloud":   None,              # seam: wire a cloud model here later
