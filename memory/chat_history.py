@@ -80,3 +80,26 @@ def load_session(session_id: str) -> list[dict]:
 def delete_session(session_id: str) -> None:
     with _conn() as con:
         con.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+
+
+def list_sessions() -> list[dict]:
+    """Returns sessions ordered by last activity desc, with title from first user message."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT session_id, "
+            "  (SELECT content FROM chat_messages m2 WHERE m2.session_id=m.session_id AND m2.role='user' ORDER BY id LIMIT 1) as title, "
+            "  MAX(ts) as last_ts, "
+            "  COUNT(*) as message_count "
+            "FROM chat_messages m "
+            "GROUP BY session_id "
+            "ORDER BY last_ts DESC",
+        ).fetchall()
+    return [
+        {
+            "session_id": r[0],
+            "title": (r[1] or "")[:60] if r[1] else "New Chat",
+            "ts": r[2],
+            "message_count": r[3],
+        }
+        for r in rows
+    ]

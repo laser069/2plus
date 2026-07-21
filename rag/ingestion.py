@@ -1,29 +1,29 @@
 from pathlib import Path
 
-import chromadb
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
-from config.settings import CHROMA_PERSIST, CHUNK_SIZE, CHUNK_OVERLAP, MODEL_ROUTER
-from serving.llm_client import LLMClient
+from config.settings import (
+    CHROMA_PERSIST,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    MODEL_ROUTER,
+    OLLAMA_BASE_URL,
+)
 
-_llm = LLMClient()
+_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
 
-def _get_collection() -> chromadb.Collection:
-    client = chromadb.PersistentClient(path=CHROMA_PERSIST)
-    return client.get_or_create_collection(
-        name="2plus_docs",
-        metadata={"hnsw:space": "cosine"},
+def _get_vectorstore() -> Chroma:
+    embeddings = OllamaEmbeddings(model=MODEL_ROUTER["embed"], base_url=OLLAMA_BASE_URL)
+    return Chroma(
+        collection_name="2plus_docs",
+        embedding_function=embeddings,
+        persist_directory=CHROMA_PERSIST,
+        collection_metadata={"hnsw:space": "cosine"},
     )
-
-
-def _chunk(text: str) -> list[str]:
-    chunks, start = [], 0
-    while start < len(text):
-        end = start + CHUNK_SIZE
-        chunks.append(text[start:end])
-        start += CHUNK_SIZE - CHUNK_OVERLAP
-    return [c for c in chunks if c.strip()]
 
 
 def _load_text(path_or_text: str) -> str:
@@ -34,10 +34,10 @@ def _load_text(path_or_text: str) -> str:
 
 
 def delete_by_doc_id(doc_id: str) -> None:
-    col = _get_collection()
-    results = col.get(where={"doc_id": doc_id})
+    store = _get_vectorstore()
+    results = store._collection.get(where={"doc_id": doc_id})
     if results["ids"]:
-        col.delete(ids=results["ids"])
+        store.delete(ids=results["ids"])
         logger.info(f"deleted {len(results['ids'])} chunks for doc_id={doc_id}")
 
 
@@ -47,35 +47,24 @@ def ingest(path_or_text: str, doc_id: str, metadata: dict | None = None) -> int:
     delete_by_doc_id(doc_id)
 
     text = _load_text(path_or_text)
-    chunks = _chunk(text)
+    chunks = [c for c in _splitter.split_text(text) if c.strip()]
     if not chunks:
         return 0
 
-    col = _get_collection()
-    ids, embeddings, documents, metas = [], [], [], []
+    store = _get_vectorstore()
+    ids = [f"{doc_id}::chunk{i}" for i in range(len(chunks))]
+    metas = [{"doc_id": doc_id, "chunk_idx": i, **metadata} for i in range(len(chunks))]
 
-    for i, chunk in enumerate(chunks):
-        emb = _llm.embed(chunk, model=MODEL_ROUTER["embed"])
-        if not emb:
-            logger.warning(f"empty embedding for chunk {i} of {doc_id}")
-            continue
-        chunk_id = f"{doc_id}::chunk{i}"
-        ids.append(chunk_id)
-        embeddings.append(emb)
-        documents.append(chunk)
-        metas.append({"doc_id": doc_id, "chunk_idx": i, **metadata})
-
-    if ids:
-        col.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metas)
-        logger.info(f"ingested {len(ids)} chunks for doc_id={doc_id}")
+    store.add_texts(texts=chunks, metadatas=metas, ids=ids)
+    logger.info(f"ingested {len(ids)} chunks for doc_id={doc_id}")
 
     return len(ids)
 
 
 def list_docs() -> list[str]:
     """Return unique doc_ids stored in the collection."""
-    col = _get_collection()
-    results = col.get()
+    store = _get_vectorstore()
+    results = store._collection.get()
     seen, docs = set(), []
     for meta in results.get("metadatas") or []:
         d = meta.get("doc_id", "")

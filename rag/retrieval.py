@@ -1,17 +1,23 @@
-import chromadb
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaEmbeddings
 from loguru import logger
 
-from config.settings import CHROMA_PERSIST, TOP_K_RETRIEVAL, RAG_CHUNK_MAX, MODEL_ROUTER
-from serving.llm_client import LLMClient
+from config.settings import (
+    CHROMA_PERSIST,
+    TOP_K_RETRIEVAL,
+    RAG_CHUNK_MAX,
+    MODEL_ROUTER,
+    OLLAMA_BASE_URL,
+)
 
-_llm = LLMClient()
 
-
-def _get_collection() -> chromadb.Collection:
-    client = chromadb.PersistentClient(path=CHROMA_PERSIST)
-    return client.get_or_create_collection(
-        name="2plus_docs",
-        metadata={"hnsw:space": "cosine"},
+def _get_vectorstore() -> Chroma:
+    embeddings = OllamaEmbeddings(model=MODEL_ROUTER["embed"], base_url=OLLAMA_BASE_URL)
+    return Chroma(
+        collection_name="2plus_docs",
+        embedding_function=embeddings,
+        persist_directory=CHROMA_PERSIST,
+        collection_metadata={"hnsw:space": "cosine"},
     )
 
 
@@ -22,36 +28,22 @@ def retrieve(
 ) -> list[dict]:
     """Return top-k chunks relevant to query, each text truncated to RAG_CHUNK_MAX chars.
     Total returned chars stay within budget_chars."""
-    emb = _llm.embed(query, model=MODEL_ROUTER["embed"])
-    if not emb:
-        logger.warning("empty embedding for retrieval query")
-        return []
-
-    col = _get_collection()
     try:
-        results = col.query(
-            query_embeddings=[emb],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-        )
+        results = _get_vectorstore().similarity_search_with_score(query, k=top_k)
     except Exception as exc:
         logger.error(f"chroma query error: {exc}")
         return []
 
-    docs = results.get("documents", [[]])[0]
-    metas = results.get("metadatas", [[]])[0]
-    dists = results.get("distances", [[]])[0]
-
     chunks, chars_used = [], 0
-    for text, meta, dist in zip(docs, metas, dists):
-        text = (text or "")[:RAG_CHUNK_MAX]
+    for doc, dist in results:
+        text = (doc.page_content or "")[:RAG_CHUNK_MAX]
         if chars_used + len(text) > budget_chars:
             break
         chunks.append({
             "text": text,
-            "doc_id": meta.get("doc_id", ""),
+            "doc_id": doc.metadata.get("doc_id", ""),
             "score": round(1 - dist, 4),   # cosine similarity
-            "metadata": meta,
+            "metadata": doc.metadata,
         })
         chars_used += len(text)
 
