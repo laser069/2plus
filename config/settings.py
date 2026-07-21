@@ -18,6 +18,10 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # "30m" = keep 30 min; "-1" = never unload; "0" = unload immediately.
 # Pinning the chat model avoids cold reloads on tight-VRAM GPUs.
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+# Cap on generated tokens per reply and a client-side request timeout, so a
+# slow/stuck generation fails fast instead of hanging indefinitely.
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
+OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "120"))
 
 # --- OpenRouter ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")

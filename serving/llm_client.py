@@ -18,6 +18,8 @@ from config.settings import (
     MODEL_ROUTER,
     OLLAMA_BASE_URL,
     OLLAMA_KEEP_ALIVE,
+    OLLAMA_NUM_PREDICT,
+    OLLAMA_TIMEOUT_S,
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
@@ -186,7 +188,11 @@ class LLMClient:
     def _ollama_chat(self, model: str) -> ChatOllama:
         if model not in self._ollama_chat_models:
             self._ollama_chat_models[model] = ChatOllama(
-                model=model, base_url=OLLAMA_BASE_URL, keep_alive=OLLAMA_KEEP_ALIVE
+                model=model,
+                base_url=OLLAMA_BASE_URL,
+                keep_alive=OLLAMA_KEEP_ALIVE,
+                num_predict=OLLAMA_NUM_PREDICT,
+                client_kwargs={"timeout": OLLAMA_TIMEOUT_S},
             )
         return self._ollama_chat_models[model]
 
