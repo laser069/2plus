@@ -39,6 +39,8 @@ _sessions: dict[str, tuple[ConvoMemory, Agent]] = {}
 def _get_or_create_session(session_id: str) -> tuple[ConvoMemory, Agent]:
     if session_id not in _sessions:
         convo = ConvoMemory()
+        for msg in load_session(session_id):
+            convo.add_turn(msg["role"], msg["content"])
         agent = Agent(convo)
         _sessions[session_id] = (convo, agent)
     return _sessions[session_id]
