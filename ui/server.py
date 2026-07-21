@@ -32,9 +32,10 @@ app = FastAPI(title="2Plus")
 
 @app.on_event("startup")
 async def _warm_default_model() -> None:
-    """Preload the default chat model into VRAM in the background so the
-    first real user request doesn't pay the cold-load cost."""
-    asyncio.get_running_loop().run_in_executor(None, _llm.warm)
+    """Preload the default chat model into VRAM before accepting traffic, so
+    the first real user request doesn't race the warm-up call and queue
+    behind it on Ollama's single-model-load serialization."""
+    await asyncio.get_running_loop().run_in_executor(None, _llm.warm)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
