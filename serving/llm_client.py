@@ -1,12 +1,18 @@
 import time
 import json
-import os
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generator
 
-import ollama
 from loguru import logger
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_openai import ChatOpenAI
 
 from config.settings import (
     MODEL_ROUTER,
@@ -44,6 +50,9 @@ class _ToolCall:
 
 
 # ── Public response type ──────────────────────────────────────────────────────
+
+from dataclasses import dataclass, field
+
 
 @dataclass
 class ChatResponse:
@@ -85,48 +94,54 @@ _OAI_CONFIG = {
 }
 
 
-def _to_openai_messages(messages: list[dict]) -> list[dict]:
-    """Convert canonical message list to OpenAI-compatible format for OpenRouter."""
-    result: list[dict] = []
+def _to_lc_messages(messages: list[dict]) -> list[BaseMessage]:
+    """Convert canonical message list to LangChain BaseMessage objects."""
+    result: list[BaseMessage] = []
     last_calls: list[tuple[str, str]] = []  # (tool_name, call_id) from last assistant msg
 
     for msg in messages:
         role = msg["role"]
 
-        if role == "assistant" and msg.get("tool_calls"):
-            oai_calls = []
+        if role == "system":
+            result.append(SystemMessage(content=msg.get("content") or ""))
+
+        elif role == "assistant" and msg.get("tool_calls"):
+            lc_calls = []
             last_calls = []
             for i, tc in enumerate(msg["tool_calls"]):
                 tc_id = getattr(tc, "id", "") or f"call_{i}"
                 name = tc.function.name
                 args = tc.function.arguments
-                if isinstance(args, dict):
-                    args = json.dumps(args)
-                oai_calls.append({
-                    "id": tc_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args or "{}"},
-                })
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                lc_calls.append({"name": name, "args": args or {}, "id": tc_id})
                 last_calls.append((name, tc_id))
-            result.append({
-                "role": "assistant",
-                "content": msg.get("content") or "",
-                "tool_calls": oai_calls,
-            })
+            result.append(AIMessage(content=msg.get("content") or "", tool_calls=lc_calls))
+
+        elif role == "assistant":
+            result.append(AIMessage(content=msg.get("content") or ""))
 
         elif role == "tool":
             name = msg.get("name", "")
             tc_id = next((cid for n, cid in last_calls if n == name), "call_0")
-            result.append({
-                "role": "tool",
-                "tool_call_id": tc_id,
-                "content": msg.get("content", ""),
-            })
+            result.append(
+                ToolMessage(content=msg.get("content", ""), tool_call_id=tc_id, name=name)
+            )
 
         else:
-            result.append({k: v for k, v in msg.items() if k != "tool_calls"})
+            result.append(HumanMessage(content=msg.get("content") or ""))
 
     return result
+
+
+def _from_lc_tool_calls(ai_msg: AIMessage) -> list[_ToolCall]:
+    tcs = []
+    for tc in (ai_msg.tool_calls or []):
+        tcs.append(_ToolCall(tc["name"], tc.get("args") or {}, tc.get("id") or ""))
+    return tcs
 
 
 def _inject_no_think(messages: list[dict]) -> list[dict]:
@@ -143,21 +158,31 @@ def _inject_no_think(messages: list[dict]) -> list[dict]:
 
 class LLMClient:
     def __init__(self) -> None:
-        self._ollama = ollama.Client(host=OLLAMA_BASE_URL)
-        self._oai_clients: dict[str, Any] = {}  # lazy per-provider
+        self._ollama_chat_models: dict[str, ChatOllama] = {}  # keyed by model name
+        self._oai_chat_models: dict[str, ChatOpenAI] = {}     # keyed by "provider::model"
+        self._embeddings: dict[str, OllamaEmbeddings] = {}
 
-    def _oai_client(self, provider: str) -> Any:
-        """Lazily build & cache an OpenAI-compatible client for the provider."""
-        if provider not in self._oai_clients:
+    def _ollama_chat(self, model: str) -> ChatOllama:
+        if model not in self._ollama_chat_models:
+            self._ollama_chat_models[model] = ChatOllama(model=model, base_url=OLLAMA_BASE_URL)
+        return self._ollama_chat_models[model]
+
+    def _oai_chat(self, model: str, provider: str) -> ChatOpenAI:
+        key = f"{provider}::{model}"
+        if key not in self._oai_chat_models:
             api_key, base_url = _OAI_CONFIG[provider]
             if not api_key:
                 raise RuntimeError(
                     f"{provider.upper()}_API_KEY is not set in .env — "
                     f"add it to use {provider} models."
                 )
-            from openai import OpenAI
-            self._oai_clients[provider] = OpenAI(base_url=base_url, api_key=api_key)
-        return self._oai_clients[provider]
+            self._oai_chat_models[key] = ChatOpenAI(model=model, base_url=base_url, api_key=api_key)
+        return self._oai_chat_models[key]
+
+    def _embedder(self, model: str) -> OllamaEmbeddings:
+        if model not in self._embeddings:
+            self._embeddings[model] = OllamaEmbeddings(model=model, base_url=OLLAMA_BASE_URL)
+        return self._embeddings[model]
 
     # ── chat ─────────────────────────────────────────────────────────────────
 
@@ -212,16 +237,12 @@ class LLMClient:
     ) -> tuple[str, list]:
         if not think:
             messages = _inject_no_think(messages)
-        kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        lc_messages = _to_lc_messages(messages)
+        chat_model = self._ollama_chat(model)
         if tools:
-            kwargs["tools"] = tools
-        resp = self._ollama.chat(**kwargs)
-        msg = resp.message
-        # Wrap Ollama tool calls in _ToolCall so agent accesses uniform interface
-        tcs = []
-        for tc in (msg.tool_calls or []):
-            tcs.append(_ToolCall(tc.function.name, tc.function.arguments or {}))
-        return msg.content or "", tcs
+            chat_model = chat_model.bind_tools(tools)
+        resp = chat_model.invoke(lc_messages)
+        return resp.content or "", _from_lc_tool_calls(resp)
 
     def _chat_openai(
         self,
@@ -230,22 +251,12 @@ class LLMClient:
         tools: list[dict] | None,
         provider: str,
     ) -> tuple[str, list]:
-        oai_msgs = _to_openai_messages(messages)
-        kwargs: dict[str, Any] = {"model": model, "messages": oai_msgs}
+        lc_messages = _to_lc_messages(messages)
+        chat_model = self._oai_chat(model, provider)
         if tools:
-            kwargs["tools"] = tools
-        resp = self._oai_client(provider).chat.completions.create(**kwargs)
-        msg = resp.choices[0].message
-        content = msg.content or ""
-        tcs = []
-        for tc in (msg.tool_calls or []):
-            args = tc.function.arguments
-            try:
-                args = json.loads(args) if isinstance(args, str) else args
-            except (json.JSONDecodeError, TypeError):
-                pass
-            tcs.append(_ToolCall(tc.function.name, args or {}, tc.id))
-        return content, tcs
+            chat_model = chat_model.bind_tools(tools)
+        resp = chat_model.invoke(lc_messages)
+        return resp.content or "", _from_lc_tool_calls(resp)
 
     # ── chat_stream ───────────────────────────────────────────────────────────
 
@@ -290,25 +301,20 @@ class LLMClient:
     ) -> Generator[str, None, None]:
         if not think:
             messages = _inject_no_think(messages)
-        for chunk in self._ollama.chat(model=model, messages=messages, stream=True):
-            delta = (chunk.message.content or "") if chunk.message else ""
+        lc_messages = _to_lc_messages(messages)
+        for chunk in self._ollama_chat(model).stream(lc_messages):
+            delta = chunk.content or ""
             if delta:
                 yield delta
 
     def _stream_openai(
         self, messages: list[dict], model: str, provider: str
     ) -> Generator[str, None, None]:
-        oai_msgs = _to_openai_messages(messages)
-        stream = self._oai_client(provider).chat.completions.create(
-            model=model,
-            messages=oai_msgs,
-            stream=True,
-        )
-        for chunk in stream:
-            if chunk.choices:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield delta
+        lc_messages = _to_lc_messages(messages)
+        for chunk in self._oai_chat(model, provider).stream(lc_messages):
+            delta = chunk.content or ""
+            if delta:
+                yield delta
 
     # ── embed ─────────────────────────────────────────────────────────────────
 
@@ -318,11 +324,11 @@ class LLMClient:
         t0 = time.perf_counter()
         success = False
         try:
-            resp = self._ollama.embeddings(model=model, prompt=text)
+            vector = self._embedder(model).embed_query(text)
             success = True
             latency = (time.perf_counter() - t0) * 1000
             logger.debug(f"embed  {model}  {latency:.0f}ms  chars={len(text)}")
-            return resp["embedding"]
+            return vector
         except Exception as exc:
             logger.error(f"embed error: {exc}")
             return []
