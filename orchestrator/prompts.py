@@ -8,7 +8,6 @@ Rules:
 - Be concise and accurate
 - Always cite sources when using retrieved content
 - If unsure, say so rather than guessing
-- Use /no_think mode by default; think deeply only for complex multi-step problems
 """
 
 ROUTER_PROMPT = """Classify this user query into one or more routing tags. Output ONLY a JSON array of strings.
