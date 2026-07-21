@@ -448,3 +448,66 @@ html, body {
 
 /* ── Utility ── */
 .hidden { display: none !important; }
+
+/* ── Mobile header toggle (hidden on desktop) ── */
+#btn-menu {
+  display: none;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: 30px; height: 30px;
+  border-radius: 7px;
+  font-size: 1rem;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+#sidebar-backdrop {
+  display: none;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  html, body { font-size: 15px; }
+
+  #btn-menu { display: flex; }
+
+  #sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    z-index: 50;
+    width: 82vw;
+    max-width: 300px;
+    min-width: 0;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 24px rgba(0,0,0,0.4);
+  }
+  #sidebar.open { transform: translateX(0); }
+
+  #sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 40;
+  }
+  #sidebar-backdrop.open { display: block; }
+
+  #chat-header { padding: 10px 12px; }
+  #header-title { font-size: 0.95rem; }
+  #btn-export span.label { display: none; }
+
+  #messages { padding: 12px; gap: 10px; }
+  .msg-wrap.user .msg { max-width: 92%; }
+  .msg { padding: 9px 12px; }
+
+  #input-bar { padding: 10px 12px 12px; gap: 6px; }
+  #btn-send { padding: 9px 12px; font-size: 0.75rem; }
+}
+
+@media (max-width: 400px) {
+  #chat-input { font-size: 16px; } /* avoid iOS auto-zoom on focus */
+}

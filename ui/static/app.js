@@ -28,6 +28,9 @@ const cloudWrap    = $('cloud-model-wrap');
 const fileUpload   = $('file-upload');
 const docsList     = $('docs-list');
 const factsList    = $('facts-list');
+const btnMenu      = $('btn-menu');
+const sidebar      = $('sidebar');
+const sidebarBackdrop = $('sidebar-backdrop');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
@@ -548,6 +551,21 @@ fileUpload.onchange = async () => {
   fileUpload.value = '';
   await loadDocs();
 };
+
+// ── Mobile sidebar drawer ─────────────────────────────────────────────────────
+function openSidebar() {
+  sidebar.classList.add('open');
+  sidebarBackdrop.classList.add('open');
+}
+function closeSidebar() {
+  sidebar.classList.remove('open');
+  sidebarBackdrop.classList.remove('open');
+}
+btnMenu.onclick = () => sidebar.classList.contains('open') ? closeSidebar() : openSidebar();
+sidebarBackdrop.onclick = () => closeSidebar();
+
+const _origSwitchSession = switchSession;
+switchSession = async sid => { await _origSwitchSession(sid); closeSidebar(); };
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 init().catch(console.error);
