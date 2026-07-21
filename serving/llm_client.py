@@ -218,7 +218,7 @@ class LLMClient:
             return
         try:
             t0 = time.perf_counter()
-            self._ollama_chat(model).bind(num_predict=1).invoke([HumanMessage(content="hi")])
+            self._ollama_chat(model).invoke([HumanMessage(content="/no_think\nhi")])
             logger.info(f"warm {model}  {(time.perf_counter() - t0) * 1000:.0f}ms")
         except Exception as exc:
             logger.warning(f"warm failed ({model}): {exc}")
