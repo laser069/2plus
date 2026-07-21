@@ -12,7 +12,7 @@ from loguru import logger
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from config.settings import MAX_REACT_STEPS, CTX_BUDGET_CHARS
-from serving.llm_client import LLMClient, inject_no_think_lc
+from serving.llm_client import LLMClient
 from memory.convo import ConvoMemory
 import memory.user_facts as uf
 from tools.registry import lc_tools_for_routes, TOOL_REGISTRY
@@ -119,12 +119,10 @@ class Agent:
 
         # 3. Append user query
         messages.append(HumanMessage(content=query))
-        if not think:
-            messages = inject_no_think_lc(messages)
 
         # 4. Resolve LangChain tools for active routes
         lc_tools = lc_tools_for_routes(routes)
-        chat_model = _llm.get_chat_model(model, tools=lc_tools or None, fallback_model=fallback_model)
+        chat_model = _llm.get_chat_model(model, tools=lc_tools or None, fallback_model=fallback_model, think=think)
 
         # 5. ReAct loop
         steps = 0
@@ -146,7 +144,7 @@ class Agent:
                 messages.append(HumanMessage(
                     content="[context budget reached — answer with information gathered so far]"
                 ))
-                no_tools_model = _llm.get_chat_model(model, fallback_model=fallback_model)
+                no_tools_model = _llm.get_chat_model(model, fallback_model=fallback_model, think=think)
                 final = no_tools_model.invoke(messages)
                 answer = (final.content or "").strip()
                 steps += 1
@@ -199,8 +197,6 @@ class Agent:
         messages, chars_used = self.convo.get_context(query, SYSTEM_PROMPT)
         remaining = CTX_BUDGET_CHARS - chars_used
         messages.append(HumanMessage(content=query))
-        if not think:
-            messages = inject_no_think_lc(messages)
 
         lc_tools = lc_tools_for_routes(routes)
         t_context = perf_counter()
@@ -212,7 +208,7 @@ class Agent:
 
         # 3a. Fast path — no tools needed → stream the answer live token-by-token
         if not lc_tools:
-            chat_model = _llm.get_chat_model(model, fallback_model=fallback_model)
+            chat_model = _llm.get_chat_model(model, fallback_model=fallback_model, think=think)
             for chunk in chat_model.stream(messages):
                 delta = chunk.content or ""
                 if delta:
@@ -223,7 +219,7 @@ class Agent:
             steps = 1
         else:
             # 3b. ReAct loop — blocking for tool steps
-            chat_model = _llm.get_chat_model(model, tools=lc_tools, fallback_model=fallback_model)
+            chat_model = _llm.get_chat_model(model, tools=lc_tools, fallback_model=fallback_model, think=think)
             while steps < MAX_REACT_STEPS:
                 resp: AIMessage = chat_model.invoke(messages)
                 steps += 1
@@ -247,7 +243,7 @@ class Agent:
                     messages.append(HumanMessage(
                         content="[context budget reached — answer with information gathered so far]"
                     ))
-                    no_tools_model = _llm.get_chat_model(model, fallback_model=fallback_model)
+                    no_tools_model = _llm.get_chat_model(model, fallback_model=fallback_model, think=think)
                     for chunk in no_tools_model.stream(messages):
                         delta = chunk.content or ""
                         if delta:
