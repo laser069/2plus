@@ -14,6 +14,10 @@ MODEL_ROUTER = {
 
 # --- Ollama ---
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+# How long Ollama keeps a model resident in VRAM after a call.
+# "30m" = keep 30 min; "-1" = never unload; "0" = unload immediately.
+# Pinning the chat model avoids cold reloads on tight-VRAM GPUs.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
 # --- OpenRouter ---
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -42,3 +46,13 @@ RAG_CHUNK_MAX     = 1200   # max chars per retrieved chunk
 
 # --- Conversation window ---
 CONVO_WINDOW     = 6       # verbatim turns before summarising older ones
+
+# --- Router cache ---
+ROUTER_CACHE_SIZE = 128    # LRU slots for classify() result cache
+
+# --- Router LLM fallback ---
+# When False (default), ambiguous multi-signal queries resolve to the UNION of
+# matched heuristic tags instead of calling an LLM. This avoids loading a second
+# model (qwen3.5:4b) on tight-VRAM GPUs and never touches a local model when the
+# chat model is a cloud one. Set True to restore LLM-based disambiguation.
+ROUTER_LLM_FALLBACK = os.getenv("ROUTER_LLM_FALLBACK", "0") == "1"

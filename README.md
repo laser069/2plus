@@ -28,7 +28,7 @@ A fully local, privacy-first AI assistant that combines retrieval-augmented gene
 
 ## Overview
 
-2Plus is built around a **ReAct (Reason + Act)** agent loop that intelligently decides when to search your documents, browse the web, recall stored facts, or answer directly from its own knowledge. It runs primarily on [Ollama](https://ollama.com/) for fully local LLM inference, with optional cloud routing to any model on [OpenRouter](https://openrouter.ai/) when you need stronger reasoning or larger context windows. Chat and embedding calls go through [LangChain](https://python.langchain.com/) chat model wrappers (`ChatOllama`, `ChatOpenAI`, `OllamaEmbeddings`) for standardized message and tool-calling handling — the ReAct loop itself, routing, RAG storage, and memory remain hand-rolled (see [LangChain Integration](#langchain-integration)).
+2Plus is built around a **ReAct (Reason + Act)** agent loop that intelligently decides when to search your documents, browse the web, recall stored facts, or answer directly from its own knowledge. It runs primarily on [Ollama](https://ollama.com/) for fully local LLM inference, with optional cloud routing to any model on [OpenRouter](https://openrouter.ai/) when you need stronger reasoning or larger context windows. Chat and embedding calls, the ReAct tool-calling loop, RAG storage, and conversation windowing all run on [LangChain](https://python.langchain.com/) primitives (see [LangChain Integration](#langchain-integration)); routing uses a fast keyword heuristic with an optional cached LLM fallback for ambiguous queries, and Ollama keeps the active model resident in VRAM between calls (`OLLAMA_KEEP_ALIVE`) to avoid cold-load thrash when switching models.
 
 **Primary model:** `qwen3:8b`  
 **Embeddings model:** `all-minilm:l6-v2`  
@@ -829,8 +829,9 @@ pip install ddgs
 - [x] Cloud model routing via OpenRouter (opt-in per conversation)
 - [x] LangChain-backed LLM calling layer (`ChatOllama`/`ChatOpenAI`/`OllamaEmbeddings`)
 - [x] LangChain-native ReAct tool-calling loop, RAG vector store, and conversation window
+- [x] Heuristic query router with cached LLM fallback for ambiguous queries
+- [x] Model-swap thrash elimination (`OLLAMA_KEEP_ALIVE`, model warm-on-select, parallel tool dispatch)
 - [ ] Vector-based chat history recall for fuzzy "what did we discuss" queries
 - [ ] Playwright fallback for JavaScript-heavy pages
 - [ ] Multi-user session support (auth; `_sessions` cache is currently single-process/no-auth)
 - [ ] Langfuse integration for production observability
-- [ ] `langchain_chroma` vectorstore for RAG ingestion/retrieval (currently raw ChromaDB client)

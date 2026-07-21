@@ -1,4 +1,5 @@
 from __future__ import annotations
+import threading
 from typing import TYPE_CHECKING
 
 from langchain_core.messages import (
@@ -23,35 +24,44 @@ _SUMMARY_KEY = "convo_summary"
 
 
 class ConvoMemory:
-    """Manages in-process turn window + persistent rolling summary."""
+    """Manages in-process turn window + persistent rolling summary.
+
+    Thread-safe: add_turn/get_context/maybe_summarise may be called from
+    background daemon threads spawned by the agent.
+    """
 
     def __init__(self) -> None:
         self._turns: list[BaseMessage] = []   # verbatim recent turns
+        self._lock = threading.Lock()
 
     def add_turn(self, role: str, content: str) -> None:
         msg = HumanMessage(content=content) if role == "user" else AIMessage(content=content)
-        self._turns.append(msg)
+        with self._lock:
+            self._turns.append(msg)
 
-    def maybe_summarise(self, llm: LLMClient) -> None:
+    def maybe_summarise(self, llm: LLMClient, model: str | None = None) -> None:
         """Compress the messages that fall outside the trimmed window into the
         persisted rolling summary. Uses LangChain's trim_messages with
         token_counter=len so each message counts as one unit, i.e. a
-        message-count window rather than a token-budget one."""
-        if len(self._turns) <= CONVO_WINDOW:
-            return
+        message-count window rather than a token-budget one.
 
-        kept = trim_messages(
-            self._turns,
-            max_tokens=CONVO_WINDOW,
-            token_counter=len,
-            strategy="last",
-        )
-        n_dropped = len(self._turns) - len(kept)
-        if n_dropped <= 0:
-            return
-
-        to_compress = self._turns[:n_dropped]
-        self._turns = self._turns[n_dropped:]
+        Routes with the active chat model so a cloud session doesn't trigger a
+        local model load in the background (and a local session reuses the
+        resident model)."""
+        with self._lock:
+            if len(self._turns) <= CONVO_WINDOW:
+                return
+            kept = trim_messages(
+                self._turns,
+                max_tokens=CONVO_WINDOW,
+                token_counter=len,
+                strategy="last",
+            )
+            n_dropped = len(self._turns) - len(kept)
+            if n_dropped <= 0:
+                return
+            to_compress = self._turns[:n_dropped]
+            self._turns = self._turns[n_dropped:]
 
         text = "\n".join(f"{m.type.upper()}: {m.content}" for m in to_compress)
         existing = uf.get(_SUMMARY_KEY) or ""
@@ -61,7 +71,7 @@ class ConvoMemory:
         )
         resp = llm.chat(
             [{"role": "user", "content": prompt}],
-            model=None,   # uses default
+            model=model,
         )
         summary = (resp.content or "").strip()[:SUMMARY_MAX_CHARS]
         uf.upsert(_SUMMARY_KEY, summary)
@@ -89,12 +99,16 @@ class ConvoMemory:
             chars_used += len(block)
 
         # 4. Recent verbatim turns
-        for turn in self._turns[-CONVO_WINDOW:]:
+        with self._lock:
+            recent = list(self._turns[-CONVO_WINDOW:])
+
+        for turn in recent:
             messages.append(turn)
             chars_used += len(turn.content or "")
 
         return messages, chars_used
 
     def clear(self) -> None:
-        self._turns = []
+        with self._lock:
+            self._turns = []
         uf.delete(_SUMMARY_KEY)

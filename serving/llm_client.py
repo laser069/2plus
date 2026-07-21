@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 from config.settings import (
     MODEL_ROUTER,
     OLLAMA_BASE_URL,
+    OLLAMA_KEEP_ALIVE,
     LOG_DIR,
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
@@ -64,8 +65,15 @@ class ChatResponse:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _log_call(model: str, kind: str, latency_ms: float, success: bool, chars_in: int) -> None:
-    entry = {
+def _log_call(
+    model: str,
+    kind: str,
+    latency_ms: float,
+    success: bool,
+    chars_in: int,
+    ttft_ms: float | None = None,
+) -> None:
+    entry: dict = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "model": model,
         "kind": kind,
@@ -73,6 +81,8 @@ def _log_call(model: str, kind: str, latency_ms: float, success: bool, chars_in:
         "success": success,
         "chars_in": chars_in,
     }
+    if ttft_ms is not None:
+        entry["ttft_ms"] = round(ttft_ms, 1)
     with open(_call_log, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -175,7 +185,9 @@ class LLMClient:
 
     def _ollama_chat(self, model: str) -> ChatOllama:
         if model not in self._ollama_chat_models:
-            self._ollama_chat_models[model] = ChatOllama(model=model, base_url=OLLAMA_BASE_URL)
+            self._ollama_chat_models[model] = ChatOllama(
+                model=model, base_url=OLLAMA_BASE_URL, keep_alive=OLLAMA_KEEP_ALIVE
+            )
         return self._ollama_chat_models[model]
 
     def _oai_chat(self, model: str, provider: str) -> ChatOpenAI:
@@ -192,8 +204,24 @@ class LLMClient:
 
     def _embedder(self, model: str) -> OllamaEmbeddings:
         if model not in self._embeddings:
-            self._embeddings[model] = OllamaEmbeddings(model=model, base_url=OLLAMA_BASE_URL)
+            self._embeddings[model] = OllamaEmbeddings(
+                model=model, base_url=OLLAMA_BASE_URL, keep_alive=OLLAMA_KEEP_ALIVE
+            )
         return self._embeddings[model]
+
+    def warm(self, model: str | None = None) -> None:
+        """Preload a local model into VRAM so the first real query isn't a cold
+        load. No-op for cloud models (no local residency). Best-effort:
+        failures are logged, never raised."""
+        model = model or MODEL_ROUTER["default"]
+        if _is_cloud(model):
+            return
+        try:
+            t0 = time.perf_counter()
+            self._ollama_chat(model).bind(num_predict=1).invoke([HumanMessage(content="hi")])
+            logger.info(f"warm {model}  {(time.perf_counter() - t0) * 1000:.0f}ms")
+        except Exception as exc:
+            logger.warning(f"warm failed ({model}): {exc}")
 
     # ── native LangChain chat model access (for the ReAct agent loop) ──────────
 
@@ -314,30 +342,41 @@ class LLMClient:
         model = model or MODEL_ROUTER["default"]
         chars_in = sum(len(m.get("content") or "") for m in messages)
         t0 = time.perf_counter()
+        ttft_ms: float | None = None
         success = False
         logger.info(f"stream {model}  start")
         try:
             prov = _provider(model)
             if prov != "ollama":
-                yield from self._stream_openai(messages, model, prov)
+                gen = self._stream_openai(messages, model, prov)
             else:
                 try:
-                    yield from self._stream_ollama(messages, model, think)
+                    gen = self._stream_ollama(messages, model, think)
                 except Exception as ollama_exc:
                     if _is_cloud(fallback_model):
                         logger.warning(f"Ollama stream failed → falling back to {fallback_model}")
-                        yield from self._stream_openai(
-                            messages, fallback_model, _provider(fallback_model)
-                        )
+                        gen = self._stream_openai(messages, fallback_model, _provider(fallback_model))
+                        model = fallback_model
                     else:
                         raise ollama_exc
+
+            first = True
+            for delta in gen:
+                if first:
+                    ttft_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(f"stream {model}  ttft={ttft_ms:.0f}ms")
+                    first = False
+                yield delta
+
             success = True
-            logger.info(f"stream {model}  done  {(time.perf_counter()-t0)*1000:.0f}ms")
+            total_ms = (time.perf_counter() - t0) * 1000
+            logger.info(f"stream {model}  done  ttft={ttft_ms or 0:.0f}ms  total={total_ms:.0f}ms")
         except Exception as exc:
             logger.error(f"chat_stream error ({model}): {exc}")
             yield f"[stream error: {exc}]"
         finally:
-            _log_call(model, "chat_stream", (time.perf_counter() - t0) * 1000, success, chars_in)
+            total_ms = (time.perf_counter() - t0) * 1000
+            _log_call(model, "chat_stream", total_ms, success, chars_in, ttft_ms=ttft_ms)
 
     def _stream_ollama(
         self, messages: list[dict], model: str, think: bool

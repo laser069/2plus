@@ -212,7 +212,6 @@ if "think_mode" not in st.session_state:
     st.session_state.think_mode = False
 if "or_model" not in st.session_state:
     st.session_state.or_model = ""
-
 if "inference_mode" not in st.session_state:
     st.session_state.inference_mode = "local"
 
@@ -273,7 +272,6 @@ with st.sidebar:
     # ── Cloud model (OpenRouter) ──
     if _mode in ("cloud", "auto"):
         st.subheader("Cloud Model" if _mode == "cloud" else "Cloud Fallback")
-
         st.session_state.or_model = st.text_input(
             "OpenRouter model",
             value=st.session_state.or_model,
@@ -339,19 +337,29 @@ with st.sidebar:
 
 # ── Active model resolution ───────────────────────────────────────────────────
 _mode = st.session_state.inference_mode
+_or = st.session_state.or_model.strip()
 _local = st.session_state.selected_model
-
-_cloud = st.session_state.or_model.strip()
 
 if _mode == "local":
     _active_model = _local
     _fallback_model = None
 elif _mode == "cloud":
-    _active_model = _cloud or _local  # graceful fallback if cloud field empty
+    _active_model = _or or _local  # graceful fallback if OR field empty
     _fallback_model = None
 else:  # auto
     _active_model = _local
-    _fallback_model = _cloud or None
+    _fallback_model = _or or None
+
+# ── Warm active model (non-blocking) ──────────────────────────────────────────
+# Preload the model into VRAM on first use / model change so the first real query
+# isn't a cold load. No-op for cloud models. Fires once per model selection.
+if st.session_state.get("_warmed_model") != _active_model:
+    st.session_state._warmed_model = _active_model
+    import threading as _threading
+    from serving.llm_client import LLMClient as _LLMClient
+    _threading.Thread(
+        target=_LLMClient().warm, args=(_active_model,), daemon=True
+    ).start()
 
 # ── Header ────────────────────────────────────────────────────────────────────
 _MODE_META = {

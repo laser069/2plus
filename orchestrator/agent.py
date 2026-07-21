@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Generator
 
 from loguru import logger
@@ -32,10 +34,13 @@ def _extract_citations(text: str) -> list[str]:
     return re.findall(r"\[(?:doc|web):[^\]]+\]", text)
 
 
-def _extract_facts(assistant_msg: str) -> None:
-    """Parse new user facts from the assistant's response and upsert them."""
+def _extract_facts(assistant_msg: str, model: str | None = None) -> None:
+    """Parse new user facts from the assistant's response and upsert them.
+
+    Routes with the active chat model so a local session reuses the resident
+    model (no extra load) and a cloud session doesn't spin up a local one."""
     prompt = FACT_EXTRACT_PROMPT.format(message=assistant_msg[:1000])
-    resp = _llm.chat([{"role": "user", "content": prompt}], model=None)
+    resp = _llm.chat([{"role": "user", "content": prompt}], model=model)
     raw = (resp.content or "").strip()
     try:
         match = re.search(r"\{.*?\}", raw, re.DOTALL)
@@ -48,11 +53,13 @@ def _extract_facts(assistant_msg: str) -> None:
         pass
 
 
-def _run_tool_call(tc: dict, remaining: int) -> tuple[ToolMessage, int]:
-    """Dispatch one LangChain tool call. Returns (ToolMessage, remaining_budget)."""
-    name = tc["name"]
-    args = tc.get("args") or {}
+def _bg(fn, *args) -> None:
+    """Fire-and-forget daemon thread."""
+    threading.Thread(target=fn, args=args, daemon=True).start()
 
+
+def _dispatch_tool(name: str, args: dict, remaining: int) -> tuple[str, str]:
+    """Execute one tool call. Returns (name, result_str). Pure — no shared state mutation."""
     tool = TOOL_REGISTRY.get(name)
     if tool:
         try:
@@ -61,12 +68,36 @@ def _run_tool_call(tc: dict, remaining: int) -> tuple[ToolMessage, int]:
             result = f"[tool error: {exc}]"
     else:
         result = f"[unknown tool: {name}]"
-
     result_str = str(result)[:max(remaining, 200)]
-    remaining -= len(result_str)
     logger.info(f"tool={name} result_chars={len(result_str)}")
+    return name, result_str
 
-    return ToolMessage(content=result_str, tool_call_id=tc.get("id") or "", name=name), remaining
+
+def _run_tool_calls(tool_calls: list[dict], remaining: int) -> tuple[list[ToolMessage], int]:
+    """Dispatch a batch of LangChain tool calls (parallel if more than one).
+    Returns (tool_messages_in_call_order, remaining_budget)."""
+    tool_inputs = [(tc["name"], tc.get("args") or {}, tc.get("id") or "") for tc in tool_calls]
+
+    results: dict[str, tuple[str, str]] = {}  # tc_id -> (name, result_str)
+    if len(tool_inputs) == 1:
+        name, args, tc_id = tool_inputs[0]
+        _, result_str = _dispatch_tool(name, args, remaining)
+        results[tc_id] = (name, result_str)
+        remaining -= len(result_str)
+    else:
+        with ThreadPoolExecutor() as ex:
+            futures = {ex.submit(_dispatch_tool, n, a, remaining): tc_id for n, a, tc_id in tool_inputs}
+            for fut in as_completed(futures):
+                tc_id = futures[fut]
+                name, result_str = fut.result()
+                results[tc_id] = (name, result_str)
+                remaining -= len(result_str)
+
+    messages = [
+        ToolMessage(content=results[tc_id][1], tool_call_id=tc_id, name=results[tc_id][0])
+        for _, _, tc_id in tool_inputs
+    ]
+    return messages, remaining
 
 
 class Agent:
@@ -74,13 +105,17 @@ class Agent:
         self.convo = convo
 
     def run(self, query: str, model: str | None = None, think: bool = False, fallback_model: str | None = None) -> AgentResponse:
+        t0 = perf_counter()
+
         # 1. Route
-        routes = classify(query)
-        logger.info(f"query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={routes}")
+        routes = classify(query, model=model)
+        t_router = perf_counter()
+        logger.info(f"query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={list(routes)}")
 
         # 2. Build base context (memory-injected, budget-tracked)
         messages, chars_used = self.convo.get_context(query, SYSTEM_PROMPT)
         remaining = CTX_BUDGET_CHARS - chars_used
+        t_context = perf_counter()
 
         # 3. Append user query
         messages.append(HumanMessage(content=query))
@@ -102,11 +137,10 @@ class Agent:
                 answer = (resp.content or "").strip()
                 break
 
-            # Dispatch each tool call
+            # Dispatch tool calls (parallel if more than one)
             messages.append(resp)
-            for tc in resp.tool_calls:
-                tool_msg, remaining = _run_tool_call(tc, remaining)
-                messages.append(tool_msg)
+            tool_msgs, remaining = _run_tool_calls(resp.tool_calls, remaining)
+            messages.extend(tool_msgs)
 
             if remaining <= 0:
                 messages.append(HumanMessage(
@@ -120,19 +154,27 @@ class Agent:
         else:
             answer = "I reached the step limit. Here is what I found so far."
 
-        # 6. Update convo memory
-        self.convo.add_turn("user", query)
-        self.convo.add_turn("assistant", answer)
-        self.convo.maybe_summarise(_llm)
+        total_ms = (perf_counter() - t0) * 1000
+        router_ms = (t_router - t0) * 1000
+        ctx_ms = (t_context - t_router) * 1000
+        logger.info(
+            f"[perf] router={router_ms:.0f}ms ctx={ctx_ms:.0f}ms "
+            f"total={total_ms:.0f}ms routes={list(routes)} steps={steps}"
+        )
 
-        # 7. Extract any new user facts from answer
-        _extract_facts(answer)
+        # 6. Update convo memory (background)
+        _bg(self.convo.add_turn, "user", query)
+        _bg(self.convo.add_turn, "assistant", answer)
+        _bg(self.convo.maybe_summarise, _llm, model)
+
+        # 7. Extract any new user facts from answer (background)
+        _bg(_extract_facts, answer, model)
 
         return AgentResponse(
             answer=answer,
             citations=_extract_citations(answer),
             steps=steps,
-            routes=routes,
+            routes=list(routes),
         )
 
     def run_stream(
@@ -144,10 +186,14 @@ class Agent:
           str  — final answer token chunks
           dict {"type": "done", "citations": [...], "routes": [...], "steps": int}
         """
+        t0 = perf_counter()
+
         # 1. Route
-        routes = classify(query)
-        logger.info(f"[stream] query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={routes}")
-        yield {"type": "routing", "routes": routes}
+        routes = classify(query, model=model)
+        t_router = perf_counter()
+        router_ms = (t_router - t0) * 1000
+        logger.info(f"[stream] query={query[:60]!r}  model={model}  fallback={fallback_model}  routes={list(routes)}")
+        yield {"type": "routing", "routes": list(routes)}
 
         # 2. Build context
         messages, chars_used = self.convo.get_context(query, SYSTEM_PROMPT)
@@ -157,80 +203,92 @@ class Agent:
             messages = inject_no_think_lc(messages)
 
         lc_tools = lc_tools_for_routes(routes)
+        t_context = perf_counter()
+        ctx_ms = (t_context - t_router) * 1000
+
+        answer_chunks: list[str] = []
+        t_first_tok: float | None = None
+        steps = 0
 
         # 3a. Fast path — no tools needed → stream the answer live token-by-token
-        answer_chunks: list[str] = []
         if not lc_tools:
             chat_model = _llm.get_chat_model(model, fallback_model=fallback_model)
             for chunk in chat_model.stream(messages):
                 delta = chunk.content or ""
                 if delta:
+                    if t_first_tok is None:
+                        t_first_tok = perf_counter()
                     answer_chunks.append(delta)
                     yield delta
-            answer = "".join(answer_chunks).strip()
-            self.convo.add_turn("user", query)
-            self.convo.add_turn("assistant", answer)
-            self.convo.maybe_summarise(_llm)
-            yield {
-                "type": "done",
-                "citations": _extract_citations(answer),
-                "routes": routes,
-                "steps": 1,
-            }
-            # Fact extraction off the critical path — UI already has its answer
-            threading.Thread(target=_extract_facts, args=(answer,), daemon=True).start()
-            return
-
-        # 3b. ReAct loop — blocking for tool steps
-        chat_model = _llm.get_chat_model(model, tools=lc_tools, fallback_model=fallback_model)
-        steps = 0
-        while steps < MAX_REACT_STEPS:
-            resp: AIMessage = chat_model.invoke(messages)
-            steps += 1
-
-            if not resp.tool_calls:
-                # Yield content already received — avoids a second model call
-                content = resp.content or ""
-                answer_chunks.append(content)
-                yield content
-                break
-
-            messages.append(resp)
-            for tc in resp.tool_calls:
-                yield {"type": "tool", "name": tc["name"], "step": steps}
-                tool_msg, remaining = _run_tool_call(tc, remaining)
-                messages.append(tool_msg)
-
-            if remaining <= 0:
-                messages.append(HumanMessage(
-                    content="[context budget reached — answer with information gathered so far]"
-                ))
-                no_tools_model = _llm.get_chat_model(model, fallback_model=fallback_model)
-                for chunk in no_tools_model.stream(messages):
-                    delta = chunk.content or ""
-                    if delta:
-                        answer_chunks.append(delta)
-                        yield delta
-                steps += 1
-                break
+            steps = 1
         else:
-            fallback = "I reached the step limit. Here is what I found so far."
-            answer_chunks.append(fallback)
-            yield fallback
+            # 3b. ReAct loop — blocking for tool steps
+            chat_model = _llm.get_chat_model(model, tools=lc_tools, fallback_model=fallback_model)
+            while steps < MAX_REACT_STEPS:
+                resp: AIMessage = chat_model.invoke(messages)
+                steps += 1
+
+                if not resp.tool_calls:
+                    # Yield content already received — avoids a second model call
+                    content = resp.content or ""
+                    if t_first_tok is None:
+                        t_first_tok = perf_counter()
+                    answer_chunks.append(content)
+                    yield content
+                    break
+
+                messages.append(resp)
+                for tc in resp.tool_calls:
+                    yield {"type": "tool", "name": tc["name"], "step": steps}
+                tool_msgs, remaining = _run_tool_calls(resp.tool_calls, remaining)
+                messages.extend(tool_msgs)
+
+                if remaining <= 0:
+                    messages.append(HumanMessage(
+                        content="[context budget reached — answer with information gathered so far]"
+                    ))
+                    no_tools_model = _llm.get_chat_model(model, fallback_model=fallback_model)
+                    for chunk in no_tools_model.stream(messages):
+                        delta = chunk.content or ""
+                        if delta:
+                            if t_first_tok is None:
+                                t_first_tok = perf_counter()
+                            answer_chunks.append(delta)
+                            yield delta
+                    steps += 1
+                    break
+            else:
+                fallback = "I reached the step limit. Here is what I found so far."
+                answer_chunks.append(fallback)
+                yield fallback
 
         answer = "".join(answer_chunks).strip()
 
-        # 4. Update convo memory
-        self.convo.add_turn("user", query)
-        self.convo.add_turn("assistant", answer)
-        self.convo.maybe_summarise(_llm)
+        t_done = perf_counter()
+        ttft_ms = (t_first_tok - t0) * 1000 if t_first_tok else None
+        total_ms = (t_done - t0) * 1000
+        logger.info(
+            (
+                f"[perf] router={router_ms:.0f}ms ctx={ctx_ms:.0f}ms "
+                f"ttft={ttft_ms:.0f}ms total={total_ms:.0f}ms "
+                f"routes={list(routes)} steps={steps}"
+            ) if ttft_ms is not None else (
+                f"[perf] router={router_ms:.0f}ms ctx={ctx_ms:.0f}ms "
+                f"total={total_ms:.0f}ms routes={list(routes)} steps={steps}"
+            )
+        )
+
+        # 4. Update convo memory (background — non-blocking)
+        _bg(self.convo.add_turn, "user", query)
+        _bg(self.convo.add_turn, "assistant", answer)
+        _bg(self.convo.maybe_summarise, _llm, model)
+
+        # 5. Extract facts (background — non-blocking)
+        _bg(_extract_facts, answer, model)
 
         yield {
             "type": "done",
             "citations": _extract_citations(answer),
-            "routes": routes,
+            "routes": list(routes),
             "steps": steps,
         }
-
-        # 5. Extract facts off the critical path — UI already has its answer
-        threading.Thread(target=_extract_facts, args=(answer,), daemon=True).start()
